@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 1.0.1'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: v
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "$VERSION" > VERSION
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$(tr -d '[:space:]' < BUILD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and package
+        run: ./ReleaseUtils/build_release.sh
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'NOTES'
+          ### Install
+
+          1. Download the `.dmg`, open it, drag **MacMute** into Applications.
+          2. First launch: right-click the app -> **Open**. MacMute is ad-hoc signed and
+             not notarised, so a plain double-click is blocked by Gatekeeper.
+          3. Grant **System Settings > Privacy & Security > Accessibility** so MacMute can
+             press the Teams mute button. When upgrading, remove the old MacMute entry
+             there first: the ad-hoc signature changes on every build, so macOS treats
+             each build as a new app.
+
+          Without Accessibility permission MacMute still works; it falls back to muting
+          the default input device through CoreAudio.
+          NOTES
+          gh release create "v${{ steps.v.outputs.version }}" \
+            --title "MacMute ${{ steps.v.outputs.version }} (build ${{ steps.v.outputs.build }})" \
+            --notes-file notes.md \
+            dist/*.dmg dist/*.zip dist/*.pkg

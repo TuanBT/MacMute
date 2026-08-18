@@ -1,0 +1,19 @@
+# Build output
+.build/
+dist/
+*.dmg
+*.zip
+
+# Compiled probe binaries (sources are kept)
+probe/axprobe2
+probe/teamskey
+
+# macOS
+.DS_Store
+._*
+
+# Xcode / editors
+xcuserdata/
+DerivedData/
+.vscode/
+.idea/
