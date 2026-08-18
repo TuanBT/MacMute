@@ -1,5 +1,5 @@
 #!/usr/bin/env swift
-// Turns a flat AI render (a full-bleed square JPEG/PNG sitting on an opaque, usually
+// Turns a flat source render (a full-bleed square JPEG/PNG sitting on an opaque, usually
 // white, background) into a proper macOS icon master: background knocked out, artwork
 // trimmed, scaled onto Apple's 824-in-1024 grid and clipped to a rounded tile.
 //

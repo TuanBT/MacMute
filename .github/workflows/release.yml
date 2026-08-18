@@ -41,12 +41,17 @@ jobs:
           ### Install
 
           1. Download the `.dmg`, open it, drag **MacMute** into Applications.
-          2. First launch: right-click the app -> **Open**. MacMute is ad-hoc signed and
-             not notarised, so a plain double-click is blocked by Gatekeeper.
+          2. **First launch is blocked by macOS** - MacMute has no paid Apple Developer
+             signature. To allow it:
+             - **macOS 15 and later**: open MacMute once, let it be blocked, then go to
+               **System Settings > Privacy & Security**, scroll down and click
+               **Open Anyway**.
+             - **macOS 13-14**: right-click the app and choose **Open**.
+             - Or from Terminal, on any version: `xattr -cr /Applications/MacMute.app`
           3. Grant **System Settings > Privacy & Security > Accessibility** so MacMute can
              press the Teams mute button. When upgrading, remove the old MacMute entry
-             there first: the ad-hoc signature changes on every build, so macOS treats
-             each build as a new app.
+             there first: the signature changes on every build, so macOS treats each
+             build as a new app.
 
           Without Accessibility permission MacMute still works; it falls back to muting
           the default input device through CoreAudio.

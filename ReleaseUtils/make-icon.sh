@@ -1,10 +1,10 @@
 #!/bin/bash
-# Builds the app icon from a single AI render.
+# Builds the app icon from a single source render.
 #
-#   Resources/AppIcon.source.(jpg|png)   the raw 1024px render you generated
+#   Resources/AppIcon.source.(jpg|png)   the raw 1024px source render
 #     -> Resources/AppIcon.png           masked 1024px master (rounded tile, clear corners)
 #     -> Resources/AppIcon.icns          what the app bundle ships
-#     -> docs/assets/icon.png            what the README and the website show
+#     -> assets/icon.png                 what the README shows
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -37,7 +37,7 @@ render icon_512x512@2x.png 1024
 iconutil -c icns "$SET" -o Resources/AppIcon.icns
 rm -rf "$TMP"
 
-mkdir -p docs/assets
-cp Resources/AppIcon.png docs/assets/icon.png
+mkdir -p assets
+cp Resources/AppIcon.png assets/icon.png
 
-echo "==> Resources/AppIcon.icns and docs/assets/icon.png"
+echo "==> Resources/AppIcon.icns and assets/icon.png"

@@ -4,10 +4,6 @@ dist/
 *.dmg
 *.zip
 
-# Compiled probe binaries (sources are kept)
-probe/axprobe2
-probe/teamskey
-
 # macOS
 .DS_Store
 ._*
