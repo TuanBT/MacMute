@@ -3,7 +3,7 @@ import Foundation
 enum Settings {
     private static let shortcutKey = "shortcut"
     private static let soundKey = "soundEnabled"
-    private static let accessibilityKey = "accessibilityFallbackEnabled"
+    private static let askedKey = "askedForAccessibility"
     private static let iconStyleKey = "iconStyle"
     private static let soundPackKey = "soundPack"
 
@@ -40,16 +40,16 @@ enum Settings {
     static var soundPack: Feedback.Pack {
         get {
             guard let raw = UserDefaults.standard.string(forKey: soundPackKey),
-                  let value = Feedback.Pack(rawValue: raw) else { return .soft }
+                  let value = Feedback.Pack(rawValue: raw) else { return .click }
             return value
         }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: soundPackKey) }
     }
 
-    /// Off by default, so a fresh install never asks for Accessibility. Only worth
-    /// turning on where the Teams local API is blocked.
-    static var accessibilityFallbackEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: accessibilityKey) }
-        set { UserDefaults.standard.set(newValue, forKey: accessibilityKey) }
+    /// So the permission is asked for once, at the moment it would first have made a
+    /// difference, rather than in a dialog on first launch.
+    static var hasAskedForAccessibility: Bool {
+        get { UserDefaults.standard.bool(forKey: askedKey) }
+        set { UserDefaults.standard.set(newValue, forKey: askedKey) }
     }
 }

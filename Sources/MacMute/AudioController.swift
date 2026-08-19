@@ -16,6 +16,7 @@ import MacMuteCore
 final class AudioController: AudioBackend {
 
     private static let baselineKey = "muteBaseline"
+    private static let deafKey = "devicesIgnoringWrites"
 
     private lazy var engine = MuteEngine(backend: self)
 
@@ -41,6 +42,8 @@ final class AudioController: AudioBackend {
     /// kAudioHardwareServiceDeviceProperty_VirtualMainVolume, not exposed to Swift.
     private static let virtualMainVolume: AudioObjectPropertySelector = 0x766d7663  // 'vmvc'
 
+    private let deferQueue = DispatchQueue(label: "com.tuanbt.macmute.audio.deferred",
+                                           qos: .userInitiated)
     private var cache: [UInt32: CachedDevice] = [:]
     private var order: [UInt32] = []
     private var activityListeners: [AudioDeviceID: AudioObjectPropertyListenerBlock] = [:]
@@ -48,7 +51,12 @@ final class AudioController: AudioBackend {
 
     init() {
         refreshCache()
+        refreshInputActivity()
         engine.onBaselineChange = { [weak self] baseline in self?.persist(baseline) }
+        engine.seedDeafDevices(Set(UserDefaults.standard.stringArray(forKey: Self.deafKey) ?? []))
+        engine.onDeafDevicesChange = { uids in
+            UserDefaults.standard.set(Array(uids).sorted(), forKey: Self.deafKey)
+        }
         recoverFromCrashIfNeeded()
         observeDeviceList()
         refreshActivityListeners()
@@ -63,7 +71,17 @@ final class AudioController: AudioBackend {
 
     /// True while any app is capturing from any input device — the same signal behind
     /// the orange dot macOS shows in the menu bar.
-    var isInputActive: Bool { order.contains { isRunning($0) } }
+    ///
+    /// Stored rather than probed. Asking the HAL costs a round trip per device, a
+    /// Bluetooth headset answers slowly, and this is read several times per redraw.
+    /// The listeners below already tell us exactly when it changes.
+    private(set) var isInputActive = false
+    private var capturingDevices: Set<UInt32> = []
+
+    private func refreshInputActivity() {
+        capturingDevices = Set(order.filter { isRunning($0) })
+        isInputActive = !capturingDevices.isEmpty
+    }
 
     /// Called on quit and from the signal handlers. A HAL mute outlives the process
     /// that set it, so skipping this leaves the microphone dead with nothing in the
@@ -150,6 +168,18 @@ final class AudioController: AudioBackend {
         }
     }
 
+    /// Read from the same listener-maintained set as `isInputActive`. Probing the HAL
+    /// here would put a round trip per device back onto the keypress.
+    func isCapturing(_ id: UInt32) -> Bool { capturingDevices.contains(id) }
+
+    /// The devices nobody is listening through are silenced just after the keypress
+    /// returns instead of during it. Writing to a Bluetooth or virtual device costs
+    /// many times what the built-in microphone does, and none of it affects whether
+    /// you are audible right now.
+    func deferWork(_ work: @escaping () -> Void) {
+        deferQueue.async(execute: work)
+    }
+
     func stopVolumeGuard(_ id: UInt32) {
         guard let block = volumeGuards.removeValue(forKey: id),
               let first = cache[id]?.volumeTargets.first else { return }
@@ -159,18 +189,45 @@ final class AudioController: AudioBackend {
 
     // MARK: - Persistence
 
+    /// Stored as a plain property list rather than JSON. This runs inside the keypress
+    /// — the baseline has to reach disk before the device is written, or a crash in
+    /// between leaves a mute nothing will undo — and JSONEncoder measured about a
+    /// millisecond even for a single entry.
     private func persist(_ baseline: [String: MuteEngine.Baseline]) {
-        if baseline.isEmpty {
-            UserDefaults.standard.removeObject(forKey: Self.baselineKey)
-        } else if let data = try? JSONEncoder().encode(baseline) {
-            UserDefaults.standard.set(data, forKey: Self.baselineKey)
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        defer {
+            Timing.note(String(format: "    persist %.2f ms (%d devices)",
+                               Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6,
+                               baseline.count))
         }
+        guard !baseline.isEmpty else {
+            UserDefaults.standard.removeObject(forKey: Self.baselineKey)
+            return
+        }
+        var plist: [String: [String: Any]] = [:]
+        for (uid, entry) in baseline {
+            var fields: [String: Any] = ["m": entry.muted]
+            if let volume = entry.volume { fields["v"] = Double(volume) }
+            plist[uid] = fields
+        }
+        UserDefaults.standard.set(plist, forKey: Self.baselineKey)
     }
 
     private func recoverFromCrashIfNeeded() {
-        guard let data = UserDefaults.standard.data(forKey: Self.baselineKey),
-              let saved = try? JSONDecoder().decode([String: MuteEngine.Baseline].self,
-                                                    from: data) else { return }
+        var saved: [String: MuteEngine.Baseline] = [:]
+        if let plist = UserDefaults.standard.dictionary(forKey: Self.baselineKey) {
+            for (uid, value) in plist {
+                guard let fields = value as? [String: Any],
+                      let muted = fields["m"] as? Bool else { continue }
+                saved[uid] = MuteEngine.Baseline(muted: muted,
+                                                 volume: (fields["v"] as? Double).map(Float.init))
+            }
+        } else if let data = UserDefaults.standard.data(forKey: Self.baselineKey),
+                  let legacy = try? JSONDecoder().decode([String: MuteEngine.Baseline].self,
+                                                         from: data) {
+            // Written by an earlier build; restore it, then it is gone for good.
+            saved = legacy
+        }
         engine.restore(from: saved)
     }
 
@@ -298,6 +355,7 @@ final class AudioController: AudioBackend {
             // live microphone the user believes is off.
             self.engine.adoptNewDevices()
             self.refreshActivityListeners()
+            self.refreshInputActivity()
             self.onInputActivityChange?()
         }
     }
@@ -312,7 +370,9 @@ final class AudioController: AudioBackend {
         for device in devices where activityListeners[device] == nil {
             var address = runningAddress()
             let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-                self?.onInputActivityChange?()
+                guard let self else { return }
+                self.refreshInputActivity()
+                self.onInputActivityChange?()
             }
             if AudioObjectAddPropertyListenerBlock(device, &address, DispatchQueue.main, block) == noErr {
                 activityListeners[device] = block

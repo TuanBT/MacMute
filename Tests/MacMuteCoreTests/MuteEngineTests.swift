@@ -6,6 +6,7 @@ private struct FakeDevice {
     var uid: String
     var muteSettable: Bool
     var hasWritableVolume: Bool
+    var capturing = false
     var muted = false
     var volume: Float? = 1.0
     /// Accepts the write, reports success, changes nothing — the virtual
@@ -50,6 +51,23 @@ private final class FakeBackend: AudioBackend {
 
     func startVolumeGuard(_ id: UInt32) { guarded.insert(id) }
     func stopVolumeGuard(_ id: UInt32) { guarded.remove(id) }
+
+    func isCapturing(_ id: UInt32) -> Bool { devices[id]?.capturing ?? false }
+
+    /// Deferred work is held rather than run, so tests can assert what the keypress
+    /// itself achieved before the rest catches up. `drain` releases it.
+    var holdDeferred = false
+    private var pending: [() -> Void] = []
+
+    func deferWork(_ work: @escaping () -> Void) {
+        if holdDeferred { pending.append(work) } else { work() }
+    }
+
+    func drain() {
+        let work = pending
+        pending = []
+        work.forEach { $0() }
+    }
 }
 
 final class MuteEngineTests: XCTestCase {
@@ -69,6 +87,102 @@ final class MuteEngineTests: XCTestCase {
         XCTAssertTrue(engine.setMuted(true))
         XCTAssertTrue(backend.devices[1]!.muted)
         XCTAssertTrue(backend.devices[2]!.muted)
+    }
+
+    // MARK: - What the keypress itself has to achieve
+
+    func testTheCapturingDeviceIsMutedBeforeTheKeypressReturns() {
+        // A USB device costs about six times a built-in one to write to, and a virtual
+        // device twelve. Only the device being captured from decides whether you are
+        // audible, so only that one may block.
+        var live = FakeDevice(uid: "usb-headset", muteSettable: true, hasWritableVolume: true)
+        live.capturing = true
+        let backend = FakeBackend([
+            1: live,
+            2: FakeDevice(uid: "built-in", muteSettable: true, hasWritableVolume: true),
+            3: FakeDevice(uid: "virtual", muteSettable: true, hasWritableVolume: true),
+        ])
+        backend.holdDeferred = true
+        let engine = MuteEngine(backend: backend)
+
+        XCTAssertTrue(engine.setMuted(true))
+        XCTAssertTrue(backend.devices[1]!.muted, "the live microphone must already be silent")
+        XCTAssertFalse(backend.devices[2]!.muted, "the idle ones can wait")
+
+        backend.drain()
+        XCTAssertTrue(backend.devices[2]!.muted)
+        XCTAssertTrue(backend.devices[3]!.muted)
+    }
+
+    func testDeferredDevicesAreRestoredToTheirBaseline() {
+        var idle = FakeDevice(uid: "built-in", muteSettable: false, hasWritableVolume: true)
+        idle.volume = 0.55
+        var live = FakeDevice(uid: "usb-headset", muteSettable: true, hasWritableVolume: true)
+        live.capturing = true
+        let backend = FakeBackend([1: live, 2: idle])
+        let engine = MuteEngine(backend: backend)
+
+        engine.setMuted(true)
+        backend.holdDeferred = true
+        engine.setMuted(false)
+        backend.drain()
+
+        XCTAssertFalse(backend.devices[1]!.muted)
+        XCTAssertEqual(backend.devices[2]!.volume, 0.55,
+                       "the deferred pass must see the baseline setMuted already cleared")
+    }
+
+    func testKnownDeafDevicesCanBeSeededFromDisk() {
+        let backend = FakeBackend([
+            1: FakeDevice(uid: "virtual", muteSettable: true, hasWritableVolume: true,
+                          capturing: false, ignoresWrites: true),
+        ])
+        let engine = MuteEngine(backend: backend)
+        engine.seedDeafDevices(["virtual"])
+        let before = backend.setVolumeCalls
+        engine.setMuted(true)
+        XCTAssertEqual(backend.setVolumeCalls, before,
+                       "a device known to ignore writes is the slowest to write to")
+    }
+
+    func testRapidTogglingConvergesAndDropsStaleWork() {
+        // Each press queues writes for the idle devices, and a Bluetooth device costs
+        // milliseconds each. Superseded batches are skipped, so what matters is that
+        // the last one still lands.
+        var live = FakeDevice(uid: "usb-headset", muteSettable: true, hasWritableVolume: true)
+        live.capturing = true
+        let backend = FakeBackend([
+            1: live,
+            2: FakeDevice(uid: "bluetooth", muteSettable: true, hasWritableVolume: true),
+        ])
+        let engine = MuteEngine(backend: backend)
+
+        backend.holdDeferred = true
+        for _ in 0..<6 { engine.setMuted(true); engine.setMuted(false) }
+        engine.setMuted(true)
+        backend.drain()
+
+        XCTAssertTrue(engine.isMuted)
+        XCTAssertTrue(backend.devices[1]!.muted, "the live device is written synchronously")
+        XCTAssertTrue(backend.devices[2]!.muted, "the idle device must still catch up")
+    }
+
+    func testRapidTogglingEndingUnmutedLeavesEverythingLive() {
+        var live = FakeDevice(uid: "usb-headset", muteSettable: true, hasWritableVolume: true)
+        live.capturing = true
+        let backend = FakeBackend([
+            1: live,
+            2: FakeDevice(uid: "bluetooth", muteSettable: true, hasWritableVolume: true),
+        ])
+        let engine = MuteEngine(backend: backend)
+
+        backend.holdDeferred = true
+        for _ in 0..<5 { engine.setMuted(true); engine.setMuted(false) }
+        backend.drain()
+
+        XCTAssertFalse(engine.isMuted)
+        XCTAssertFalse(backend.devices[1]!.muted)
+        XCTAssertFalse(backend.devices[2]!.muted, "a device left muted here is a dead mic")
     }
 
     // MARK: - Devices that lie

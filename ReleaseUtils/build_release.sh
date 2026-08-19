@@ -49,8 +49,10 @@ echo "📦 Creating .zip"
 ditto -c -k --keepParent dist/MacMute.app "${STEM}.zip"
 
 echo "📦 Creating .pkg"
+# pkg-scripts holds only preinstall/postinstall: pkgbuild ships every file in the
+# directory it is given, and the rest of ReleaseUtils is build tooling.
 pkgbuild --root dist/MacMute.app \
-         --scripts ReleaseUtils \
+         --scripts ReleaseUtils/pkg-scripts \
          --identifier com.tuanbt.macmute \
          --version "$VERSION" \
          --install-location /Applications/MacMute.app \

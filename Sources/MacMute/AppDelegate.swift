@@ -4,7 +4,6 @@ import ApplicationServices
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let audio = AudioController()
-    private let teamsAPI = TeamsAPI()
     private let teamsAX = TeamsAccessibility()
     private let feedback = Feedback()
 
@@ -24,18 +23,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // No polling anywhere: CoreAudio reports capture starting and stopping, and
         // Teams pushes its own state down the socket.
-        audio.onInputActivityChange = { [weak self] in self?.render() }
-        teamsAPI.onChange = { [weak self] in self?.render() }
-        teamsAPI.start()
-
-        teamsAX.isEnabled = Settings.accessibilityFallbackEnabled
+        audio.onInputActivityChange = { [weak self] in
+            guard let self else { return }
+            if self.audio.isInputActive { self.feedback.warmUp() }
+            self.render()
+        }
         installSignalHandlers()
         render()
+        Timing.note("accessibility trusted: \(TeamsAccessibility.isTrusted)")
+        requestAccessibilityOnce()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         HotKeyManager.shared.unregister()
-        teamsAPI.stop()
         // A HAL mute outlives this process, so leaving one behind would kill the
         // microphone system wide with nothing in the macOS UI to explain it.
         audio.restoreOnExit()
@@ -71,8 +71,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // microphone is still closed and can never be picked up by an open mic.
         if !target { feedback.play(.unmute) }
         let t2 = DispatchTime.now().uptimeNanoseconds
+
         let applied = audio.setMuted(target)
+        teamsAX.setMuted(target)
         let t3 = DispatchTime.now().uptimeNanoseconds
+
         if target { feedback.play(applied ? .mute : .error) }
         if !applied && !target { feedback.play(.error) }
         let t4 = DispatchTime.now().uptimeNanoseconds
@@ -80,11 +83,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         render()
         let t5 = DispatchTime.now().uptimeNanoseconds
         Timing.log(target: target, marks: [t0, t1, t2, t3, t4, t5])
-
-        teamsAPI.setMuted(target)
-        // Only worth walking the accessibility tree when the API is not there to do
-        // the same job faster and more reliably.
-        if !teamsAPI.isConnected { teamsAX.setMuted(target) }
     }
 
     // MARK: - Presentation
@@ -96,29 +94,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func render() {
         guard let button = statusItem.button else { return }
+        let status = statusText
         button.image = StatusIcon.image(for: iconState, style: Settings.iconStyle,
-                                       description: statusText)
-        button.toolTip = "MacMute — \(statusText)"
+                                        description: status)
+        button.toolTip = "MacMute — \(status)"
     }
 
     private var statusText: String {
         let mic = audio.isMuted ? "Muted"
             : (audio.isInputActive ? "Mic live" : "Mic idle")
-        if teamsAPI.state.isInMeeting {
-            return "\(mic) · Teams meeting" + (teamsAPI.state.isMuted ? " (Teams muted)" : "")
-        }
         return mic
     }
 
     private var teamsStatusText: String {
-        if teamsAPI.isConnected {
-            return teamsAPI.state.isInMeeting ? "Teams API: connected, in a meeting"
-                                              : "Teams API: connected"
-        }
-        if teamsAX.isEnabled && TeamsAccessibility.isTrusted {
-            return "Teams API: unavailable — using Accessibility"
-        }
-        return "Teams API: unavailable"
+        TeamsAccessibility.isTrusted ? "Teams button: synced"
+                                     : "Teams button: needs Accessibility"
     }
 
     // MARK: - Menu
@@ -185,15 +175,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         launch.state = LaunchAtLogin.isEnabled ? .on : .off
         menu.addItem(launch)
 
-        // Hidden away unless it is actually needed: on a machine where the Teams API
-        // answers, this only adds a permission prompt for no benefit.
-        if !teamsAPI.isConnected || Settings.accessibilityFallbackEnabled {
-            let fallback = NSMenuItem(title: "Fallback: Press Teams Button (Accessibility)",
-                                      action: #selector(toggleAccessibilityFallback),
-                                      keyEquivalent: "")
-            fallback.target = self
-            fallback.state = Settings.accessibilityFallbackEnabled ? .on : .off
-            menu.addItem(fallback)
+        // Only worth a menu entry while it is missing; once granted there is nothing
+        // to decide.
+        if !TeamsAccessibility.isTrusted {
+            let grant = NSMenuItem(title: "⚠︎ Grant Accessibility Access…",
+                                   action: #selector(grantAccessibility), keyEquivalent: "")
+            grant.target = self
+            menu.addItem(grant)
         }
 
         menu.addItem(.separator())
@@ -249,23 +237,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func toggleAccessibilityFallback() {
-        let enabling = !Settings.accessibilityFallbackEnabled
-        Settings.accessibilityFallbackEnabled = enabling
-        teamsAX.isEnabled = enabling
+    /// Asked once, at launch, using the system's own prompt. Pressing the Teams
+    /// button is not optional any more, so hiding the request behind a menu toggle
+    /// would just mean the feature silently never worked.
+    private func requestAccessibilityOnce() {
+        guard !TeamsAccessibility.isTrusted, !Settings.hasAskedForAccessibility else { return }
+        Settings.hasAskedForAccessibility = true
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+        _ = AXIsProcessTrustedWithOptions(options as CFDictionary)
+    }
 
-        guard enabling, !TeamsAccessibility.isTrusted else { return }
+    @objc private func grantAccessibility() {
+        presentAccessibilityAlert()
+    }
+
+    private func presentAccessibilityAlert() {
         let alert = NSAlert()
         alert.messageText = "Accessibility access needed for this option"
         alert.informativeText = """
-            Muting already works without it — MacMute mutes the input device directly, \
-            and where the Teams local API is reachable it also tells Teams, with no \
-            permission at all.
+            Muting already works without it — MacMute mutes the input device directly.
 
-            This option is the fallback for machines where that API is blocked: it \
-            presses the Mute button inside the Teams window instead, so other people in \
-            the meeting still see you as muted. It is slower, and it is only used when \
-            the API is unavailable.
+            This option additionally presses the Mute button inside the Teams window, \
+            so other people in the meeting see you as muted rather than just silent. \
+            Microsoft retired the local API that used to do this without any \
+            permission, so Accessibility is now the only way.
             """
         alert.addButton(withTitle: "Open System Settings")
         alert.addButton(withTitle: "Later")
