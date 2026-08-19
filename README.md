@@ -43,8 +43,8 @@ uses the Accessibility API as the only remaining way to sync the mute indicator.
   (requires Accessibility permission)
 - **Works with all apps** — Zoom, Meet, Slack, Discord, FaceTime, and more
 - **Audio feedback** — four sound styles (Click, Soft, Marimba, Chime) or off; falling tone
-  for mute, rising for unmute
-- **Menu bar icon** — three styles to choose from; color shows mic status at a glance
+  for mute, rising for unmute. Hover over each option to preview the sound live
+- **Menu bar icon** — two styles to choose from (Coloured Icon or Filled Badge); colour shows mic status at a glance
 - **Safe** — restores all microphones on quit, on crash signals, and on next launch
 - **Lightweight** — 0% CPU when idle, no polling, about 4 ms from keypress to silence
 - **Launch at Login** — start automatically with macOS
@@ -82,10 +82,11 @@ Click the icon for settings:
 
 | Option | Description |
 |---|---|
-| **Change Shortcut…** | Set any key combination |
-| **Sound** | Click, Soft, Marimba, Chime, or Off |
-| **Menu Bar Style** | Coloured Icon, Small Badge, or Filled Badge |
+| **Change Shortcut…** | Set any key combination (live modifier preview, reset to default) |
+| **Sound** | Click, Soft, Marimba, Chime, or Off — hover to preview |
+| **Menu Bar Style** | Coloured Icon or Filled Badge |
 | **Launch at Login** | Start with macOS |
+| **About MacMute** | Version info and GitHub link |
 
 ## Requirements
 
