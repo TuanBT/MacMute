@@ -10,7 +10,7 @@ jobs:
   build:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Show toolchain
         run: swift --version
@@ -28,7 +28,7 @@ jobs:
           codesign --verify --verbose dist/MacMute.app
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: MacMute-app
           path: dist/MacMute.app

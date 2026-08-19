@@ -16,7 +16,7 @@ jobs:
   release:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Resolve version
         id: v
@@ -56,6 +56,7 @@ jobs:
           Without Accessibility permission MacMute still works; it falls back to muting
           the default input device through CoreAudio.
           NOTES
+          gh release delete "v${{ steps.v.outputs.version }}" --yes 2>/dev/null || true
           gh release create "v${{ steps.v.outputs.version }}" \
             --title "MacMute ${{ steps.v.outputs.version }} (build ${{ steps.v.outputs.build }})" \
             --notes-file notes.md \
