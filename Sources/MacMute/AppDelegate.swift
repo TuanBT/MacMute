@@ -9,6 +9,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var shortcut = Settings.shortcut
     private var signalSources: [DispatchSourceSignal] = []
+    private var previewTimer: Timer?
+    private var previewToneIsUnmute = false
 
     // MARK: - Lifecycle
 
@@ -153,6 +155,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             soundMenu.addItem(item)
         }
         sound.submenu = soundMenu
+        soundMenu.delegate = self
         menu.addItem(sound)
 
         let style = NSMenuItem(title: "Menu Bar Style", action: nil, keyEquivalent: "")
@@ -185,6 +188,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         menu.addItem(.separator())
+
+        let about = NSMenuItem(title: "About MacMute",
+                               action: #selector(showAbout), keyEquivalent: "")
+        about.target = self
+        menu.addItem(about)
+
         menu.addItem(NSMenuItem(title: "Quit MacMute",
                                 action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
@@ -226,6 +235,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               let style = StatusIcon.Style(rawValue: raw) else { return }
         Settings.iconStyle = style
         render()
+    }
+
+    @objc private func showAbout() {
+        let alert = NSAlert()
+        alert.messageText = "MacMute"
+        alert.informativeText = """
+            Version \(ShortcutRecorder.versionString)
+
+            One shortcut to mute your mic from anywhere on macOS.
+            """
+        alert.addButton(withTitle: "GitHub")
+        alert.addButton(withTitle: "OK")
+
+        if let icon = NSImage(named: "AppIcon") ?? NSImage(named: NSImage.applicationIconName) {
+            alert.icon = icon
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSWorkspace.shared.open(URL(string: "https://github.com/TuanBT/MacMute")!)
+        }
+    }
+
+    // MARK: - Sound preview
+
+    private func startPreview(for pack: Feedback.Pack) {
+        stopPreview()
+        // Play the first tone immediately
+        previewToneIsUnmute = false
+        feedback.play(.mute, pack: pack)
+
+        // Then alternate mute/unmute every 1.2 seconds
+        previewTimer = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.previewToneIsUnmute.toggle()
+            self.feedback.play(self.previewToneIsUnmute ? .unmute : .mute, pack: pack)
+        }
+    }
+
+    private func stopPreview() {
+        previewTimer?.invalidate()
+        previewTimer = nil
     }
 
     @objc private func toggleLaunchAtLogin() {
@@ -271,7 +322,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension AppDelegate: NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
-        menu.removeAllItems()
-        populate(menu)
+        // Only rebuild the main status item menu, not submenus
+        if menu == statusItem.menu {
+            menu.removeAllItems()
+            populate(menu)
+        }
+    }
+
+    func menu(_ menu: NSMenu, willHighlight item: NSMenuItem?) {
+        // Only handle sound submenu highlights
+        guard menu != statusItem.menu else {
+            // Main menu: stop any running preview when moving away from Sound submenu
+            stopPreview()
+            return
+        }
+
+        // This is a submenu — check if the highlighted item is a sound pack
+        if let raw = item?.representedObject as? String,
+           let pack = Feedback.Pack(rawValue: raw) {
+            startPreview(for: pack)
+        } else {
+            stopPreview()
+        }
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        stopPreview()
     }
 }

@@ -24,15 +24,12 @@ enum StatusIcon {
         /// No block at all: just the glyph, tinted. Closest to macOS convention, and
         /// the default — a filled block reads as a system alert rather than an app.
         case glyph
-        /// A block inset so the menu bar shows through around it.
-        case compact
         /// A filled block the full height of the icon. Loudest, and heaviest.
         case badge
 
         var title: String {
             switch self {
             case .badge: return "Filled Badge"
-            case .compact: return "Small Badge"
             case .glyph: return "Coloured Icon"
             }
         }
@@ -68,10 +65,7 @@ enum StatusIcon {
             return badge(symbol: symbol, colour: colour, description: description,
                          box: NSSize(width: 19, height: 17), corner: 4.5,
                          glyphSize: 11, weight: .semibold)
-        case .compact:
-            return badge(symbol: symbol, colour: colour, description: description,
-                         box: NSSize(width: 15, height: 13), corner: 3.5,
-                         glyphSize: 8.5, weight: .medium)
+
         case .glyph:
             guard let raw = symbolImage(state == .muted ? "mic.slash.fill" : "mic.fill",
                                         size: 13, weight: .regular) else { return nil }
