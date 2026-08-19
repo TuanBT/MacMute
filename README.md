@@ -21,8 +21,8 @@
 </p>
 
 Press <kbd>⌃</kbd><kbd>⌥</kbd><kbd>⌘</kbd><kbd>M</kbd> from any app and your mic goes quiet.
-No need to find the Teams window first, and no Teams API — so it keeps working even when
-your company disables third-party access.
+No need to find the Teams window first, and **no permissions to grant** — muting happens
+at the audio device, which is the only layer that can actually guarantee silence.
 
 ## Install
 
@@ -33,45 +33,76 @@ your company disables third-party access.
      **System Settings › Privacy & Security**, scroll down and click **Open Anyway**.
    - **macOS 13–14** — right-click the app and choose **Open**.
    - Or from Terminal, on any version: `xattr -cr /Applications/MacMute.app`
-3. Grant **System Settings › Privacy & Security › Accessibility** so MacMute can reach the
-   Teams mute button.
 
-Without Accessibility permission MacMute still works — it just mutes the input device instead.
+That is the whole setup. MacMute asks for no system permissions.
 
 ## Using it
 
-The menu bar icon always shows the real state:
+The menu bar icon shows what the microphone is really doing:
 
 | Icon | Meaning |
 |---|---|
-| Thin mic | Mic live, no meeting |
-| Filled mic | Mic live, in a Teams meeting |
+| Plain mic | Nothing is listening |
+| Green mic | An app has your microphone open |
 | Red crossed mic | Muted |
 
-Click the icon to change the shortcut, toggle **Launch at Login**, or quit.
+Green means *whatever you say right now reaches other people* — it follows the same
+signal as the orange dot macOS puts in the menu bar, so it covers Teams, Zoom, Meet and
+Slack alike. Every toggle also plays a short confirmation tone, so you never have to
+look at the menu bar to know the shortcut landed.
+
+Click the icon to change the shortcut, turn the sound off, toggle **Launch at Login**,
+or quit.
 
 ## How it works
 
-Two paths, picked automatically:
+Three layers, in the order they run on a keypress:
 
-- **In a Teams meeting** — MacMute presses the real *Mute mic* button through the macOS
-  Accessibility API. Teams performs its own action, so its window updates instantly and
-  everyone in the meeting sees the correct state. MacMute reads the button label back, so
-  the menu bar icon stays in sync even when you mute by clicking inside Teams.
-- **Anywhere else** — MacMute mutes the default input device, which covers Zoom, Google
-  Meet, Slack huddles and everything else. Those apps are genuinely muted, but their own
-  UI will not show it.
+1. **The audio device — always.** MacMute sets `kAudioDevicePropertyMute` on *every*
+   input device, not just the current default, because Teams picks its microphone
+   independently of the macOS default and asking which one it chose costs more than
+   muting all of them (measured: 10 ms against 1.5 ms). This needs no permission, and
+   it is the layer the menu bar icon believes.
 
-## Updating
+   Where a device has no real mute, MacMute zeroes its input volume instead, falling
+   back to the AudioHardwareService virtual main volume for devices that expose no
+   writable volume channel — and keeps it at zero, because Teams raises input gain when
+   it joins a meeting and would otherwise quietly reopen the microphone.
 
-The app signature changes on every build, so macOS treats each update as a new app and
-asks for Accessibility permission again. Remove the old MacMute entry under
-**System Settings › Privacy & Security › Accessibility** and add the new one.
+   Every write is confirmed by reading the value back. A device reporting success
+   proves nothing: the virtual *Microsoft Teams Audio* device accepts both a mute and a
+   volume write and then discards them.
+
+2. **The Teams local API — when it is available.** Teams exposes a WebSocket on
+   `127.0.0.1:8124`. MacMute holds it open, so toggling mute is one small JSON message
+   and Teams registers it properly, which is what makes other people in the meeting see
+   you as muted. Teams also pushes its state back, so the icon stays correct even when
+   you click mute inside Teams — no polling anywhere.
+
+   The first toggle in a meeting raises a pairing prompt in Teams. Approve it once and
+   the token is stored; later launches connect silently.
+
+3. **Accessibility — only if you turn it on.** Some machines have the local API
+   disabled by policy. There, **Sync Teams Button** in the menu falls back to pressing
+   the real Mute button through the Accessibility API. It is off by default, runs off
+   the main thread, and never blocks a keypress.
+
+Muting never depends on 2 or 3. If Teams is closed, the API is blocked and Accessibility
+is off, the shortcut still silences the microphone — you only lose the indicator inside
+the Teams window.
+
+### Quitting never leaves your mic dead
+
+A HAL mute outlives the process that set it, so a crash used to leave the microphone
+silent with nothing in the macOS UI to explain it. MacMute records what each device
+looked like before it touched anything, restores that on quit and on `SIGTERM`/`SIGINT`,
+and re-checks it on the next launch if it was killed outright.
 
 ## Requirements
 
 - macOS 13 or later
-- Microsoft Teams is optional — without it, the input-device path handles everything
+- No permissions required
+- Microsoft Teams optional — the audio device layer handles everything without it
 
 ## Build from source
 
@@ -80,8 +111,13 @@ Swift Package Manager, no dependencies. Xcode command line tools are enough.
 ```bash
 git clone https://github.com/TuanBT/MacMute.git
 cd MacMute
+swift test          # muting logic, against devices that misbehave
 ./build.sh          # builds dist/MacMute.app
 ```
+
+The decisions about what to mute live in `Sources/MacMuteCore`, free of CoreAudio, so
+they can be tested against a fake device that accepts writes and ignores them — which
+is how a real one behaves.
 
 See [`ReleaseUtils/`](ReleaseUtils/) for the full release pipeline. Pushing a `v*` tag
 builds and publishes a release from GitHub Actions.

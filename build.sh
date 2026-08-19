@@ -21,6 +21,9 @@ cp .build/release/MacMute "$APP/Contents/MacOS/MacMute"
 sed -e "s/__VERSION__/$VERSION/g" -e "s/__BUILD__/$BUILD/g" \
     Resources/Info.plist > "$APP/Contents/Info.plist"
 
+# Feedback tones. Regenerate with ./ReleaseUtils/make-sounds.py if they change.
+cp -R Resources/Sounds "$APP/Contents/Resources/Sounds"
+
 # Optional app icon. Generate it with ./make-icon.sh; the build works without one.
 if [[ -f Resources/AppIcon.icns ]]; then
     cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
