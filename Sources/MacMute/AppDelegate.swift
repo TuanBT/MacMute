@@ -255,12 +255,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = "Accessibility access needed for this option"
         alert.informativeText = """
-            Muting already works without it — MacMute mutes the input device directly.
+            MacMute needs Accessibility to press the Mute button inside Teams \
+            so others see you as muted, not just silent.
 
-            This option additionally presses the Mute button inside the Teams window, \
-            so other people in the meeting see you as muted rather than just silent. \
-            Microsoft retired the local API that used to do this without any \
-            permission, so Accessibility is now the only way.
+            After granting access, please restart MacMute.
             """
         alert.addButton(withTitle: "Open System Settings")
         alert.addButton(withTitle: "Later")

@@ -73,6 +73,7 @@ final class Feedback {
     }
 
     func play(_ tone: Tone) {
+        guard Settings.soundEnabled else { return }
         play(tone, pack: Settings.soundPack)
     }
 
