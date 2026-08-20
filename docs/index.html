@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MacMute — Global microphone mute hotkey for macOS</title>
+<meta name="description" content="Free, open-source macOS menu bar app that mutes your microphone from any app with one global hotkey. Device-level mute for Microsoft Teams, Zoom, Google Meet, Slack and Discord, plus optional push-to-talk.">
+<link rel="canonical" href="https://tuanbt.github.io/MacMute/">
+<link rel="icon" href="icon.png">
+
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://tuanbt.github.io/MacMute/">
+<meta property="og:title" content="MacMute — Global microphone mute hotkey for macOS">
+<meta property="og:description" content="One shortcut mutes your mic from any app. Device-level, works with Teams, Zoom, Meet, Slack and Discord. Free and open source.">
+<meta property="og:image" content="https://tuanbt.github.io/MacMute/menu.jpg">
+<meta name="twitter:card" content="summary_large_image">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "MacMute",
+  "description": "Free, open-source macOS menu bar app that mutes your microphone from any app with one global hotkey. Mutes at the CoreAudio device level, so it covers Microsoft Teams, Zoom, Google Meet, Slack, Discord and FaceTime at once, and offers optional push-to-talk.",
+  "applicationCategory": "UtilitiesApplication",
+  "applicationSubCategory": "Menu bar utility",
+  "operatingSystem": "macOS 13.0 or later",
+  "url": "https://tuanbt.github.io/MacMute/",
+  "downloadUrl": "https://github.com/TuanBT/MacMute/releases/latest",
+  "softwareVersion": "1.2.1",
+  "license": "https://opensource.org/licenses/MIT",
+  "isAccessibleForFree": true,
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "author": { "@type": "Person", "name": "TuanBT", "url": "https://github.com/TuanBT" },
+  "featureList": [
+    "Global microphone mute hotkey that works from any app",
+    "Device-level mute through CoreAudio, covering every application at once",
+    "Optional push-to-talk and push-to-mute by holding the shortcut",
+    "Presses the Mute button inside Microsoft Teams so others see you muted",
+    "Menu bar icon showing whether the microphone is live, idle or muted",
+    "Restores every microphone on quit, on crash and on next launch"
+  ]
+}
+</script>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "How do I mute my microphone on macOS with a keyboard shortcut?",
+      "acceptedAnswer": { "@type": "Answer", "text": "macOS has no built-in global microphone mute hotkey — the mute key on a Mac keyboard silences output, not your microphone. MacMute adds the missing one: press Control-Option-Command-M from any app, or bind whatever combination you prefer." }
+    },
+    {
+      "@type": "Question",
+      "name": "Does it mute every app, or only the one in front?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Every app. MacMute writes to the audio device through CoreAudio rather than asking any particular program to be quiet, so Zoom, Google Meet, Slack, Discord, FaceTime and anything else recording at that moment all go silent together. It mutes every input device, not just the current default." }
+    },
+    {
+      "@type": "Question",
+      "name": "Microsoft Teams already has a push-to-talk shortcut. Why use this?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Teams does have one — hold Option-Space once you enable Keyboard shortcut to unmute in Settings, Privacy. So do Zoom and Google Meet. All three share a limit: they only respond while their own window is in front. MacMute's works from wherever you actually are, and mutes the device rather than the app." }
+    },
+    {
+      "@type": "Question",
+      "name": "Is MacMute free?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes — free, open source, MIT licensed. No account, no subscription, no analytics and no network access." }
+    },
+    {
+      "@type": "Question",
+      "name": "What permissions does MacMute need?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Muting needs none at all. Accessibility is only used to press the Mute button inside Microsoft Teams; deny it and everything else still works, you simply lose the in-app indicator. MacMute never asks for microphone access, because it silences the device rather than listening to it." }
+    }
+  ]
+}
+</script>
+
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --panel: #f6f7f9;
+  --line: #e3e6ea;
+  --ink: #16181d;
+  --muted: #5b6472;
+  --accent: #1f6feb;
+  --accent-ink: #ffffff;
+  --code-bg: #f0f2f5;
+  --radius: 12px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --line: #262d36;
+    --ink: #e7edf5;
+    --muted: #9aa6b6;
+    --accent: #4c8dff;
+    --accent-ink: #06121f;
+    --code-bg: #11161d;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 780px; margin: 0 auto; padding: 0 20px; }
+a { color: var(--accent); }
+
+header { text-align: center; padding: 72px 0 44px; }
+header img.logo { width: 104px; height: 104px; border-radius: 22px; }
+h1 { font-size: 2.6rem; margin: 18px 0 6px; letter-spacing: -0.02em; }
+.tagline { font-size: 1.2rem; color: var(--muted); margin: 0 auto 8px; max-width: 34ch; }
+.sub { color: var(--muted); max-width: 56ch; margin: 0 auto; }
+
+.cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin: 28px 0 14px; }
+.btn {
+  display: inline-block; padding: 11px 22px; border-radius: 10px;
+  text-decoration: none; font-weight: 600; border: 1px solid var(--line);
+}
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.btn.ghost { color: var(--ink); background: var(--panel); }
+.req { color: var(--muted); font-size: .88rem; }
+
+pre {
+  background: var(--code-bg); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 14px 16px; overflow-x: auto; font-size: .9rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0;
+}
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+kbd {
+  background: var(--panel); border: 1px solid var(--line); border-bottom-width: 2px;
+  border-radius: 6px; padding: 1px 6px; font-size: .85em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+section { padding: 36px 0; border-top: 1px solid var(--line); }
+h2 { font-size: 1.45rem; margin: 0 0 14px; letter-spacing: -0.01em; }
+h3 { font-size: 1.02rem; margin: 26px 0 6px; }
+p { margin: 0 0 14px; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; }
+.card strong { display: block; margin-bottom: 4px; }
+.card span { color: var(--muted); font-size: .93rem; }
+
+figure { margin: 0; }
+figure img { width: 100%; height: auto; border-radius: var(--radius); border: 1px solid var(--line); }
+figcaption { color: var(--muted); font-size: .86rem; text-align: center; margin-top: 10px; }
+
+.faq p { color: var(--muted); }
+footer { border-top: 1px solid var(--line); padding: 28px 0 60px; color: var(--muted); font-size: .9rem; text-align: center; }
+footer a { color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header class="wrap">
+  <img class="logo" src="icon.png" alt="MacMute app icon" width="104" height="104">
+  <h1>MacMute</h1>
+  <p class="tagline">One shortcut to mute your mic from anywhere on macOS.</p>
+  <p class="sub">A free, open-source menu bar app that gives macOS the global microphone mute hotkey it never shipped with. It mutes the audio device itself, so a single shortcut covers every app at once.</p>
+
+  <div class="cta">
+    <a class="btn primary" href="https://github.com/TuanBT/MacMute/releases/latest">Download for macOS</a>
+    <a class="btn ghost" href="https://github.com/TuanBT/MacMute">View on GitHub</a>
+  </div>
+  <p class="req">macOS 13 or later · MIT licensed · no account, no telemetry</p>
+</header>
+
+<div class="wrap">
+
+<section>
+  <h2>Install</h2>
+  <pre><code>brew tap tuanbt/tap
+brew install --cask --no-quarantine macmute</code></pre>
+  <p style="margin-top:14px" class="req"><code>--no-quarantine</code> matters: MacMute is signed ad-hoc rather than with a paid Apple Developer ID, so without it macOS blocks the first launch. Prefer a download? Grab the <code>.dmg</code> from the <a href="https://github.com/TuanBT/MacMute/releases/latest">latest release</a>.</p>
+</section>
+
+<section>
+  <h2>Why another mute app</h2>
+  <p>Every meeting app has its own mute shortcut, and they share one limitation: <strong>they only listen while their own window is in front.</strong> Teams, Zoom and Meet all stop hearing you the moment you switch to your editor, your browser or your notes — which is exactly when you need to mute.</p>
+  <p>MacMute sits below all of them. It writes to the microphone through CoreAudio, so no app can talk over it, and it answers wherever you happen to be looking.</p>
+</section>
+
+<section>
+  <h2>What it does</h2>
+  <div class="grid">
+    <div class="card"><strong>Works from any app</strong><span>Press <kbd>⌃</kbd><kbd>⌥</kbd><kbd>⌘</kbd><kbd>M</kbd> — or your own combination — without finding the right window first.</span></div>
+    <div class="card"><strong>Mutes every microphone</strong><span>Not just the system default, because apps like Teams can quietly pick a different input device.</span></div>
+    <div class="card"><strong>Hold to Talk</strong><span>Optional. Hold the shortcut and the mic only changes while the key is down: push-to-talk when muted, push-to-mute when live.</span></div>
+    <div class="card"><strong>Teams indicator sync</strong><span>Presses the real Mute button inside Teams, so other participants see you muted rather than merely hearing silence.</span></div>
+    <div class="card"><strong>Honest menu bar icon</strong><span>Shows whether something is listening, whether you are live, and whether you are muted.</span></div>
+    <div class="card"><strong>Safe by construction</strong><span>Restores every microphone on quit, on crash signals, and on the next launch. About 4 ms from keypress to silence.</span></div>
+  </div>
+</section>
+
+<section>
+  <figure>
+    <img src="menu.jpg" alt="The MacMute menu open in the macOS menu bar, showing microphone status and settings" width="918" height="601">
+    <figcaption>The whole app: a menu bar icon that tells the truth about your microphone.</figcaption>
+  </figure>
+</section>
+
+<section class="faq">
+  <h2>Questions</h2>
+
+  <h3>How do I mute my microphone on macOS with a keyboard shortcut?</h3>
+  <p>macOS has no built-in global mute hotkey — the mute key on a Mac keyboard silences output, not your microphone. MacMute adds the missing one: press <kbd>⌃</kbd><kbd>⌥</kbd><kbd>⌘</kbd><kbd>M</kbd> from any app, or bind whatever combination you prefer.</p>
+
+  <h3>Does it mute every app, or only the one in front?</h3>
+  <p>Every app. MacMute writes to the audio device through CoreAudio rather than asking any particular program to be quiet, so Zoom, Google Meet, Slack, Discord, FaceTime and anything else recording at that moment all go silent together.</p>
+
+  <h3>Microsoft Teams already has a push-to-talk shortcut. Why use this?</h3>
+  <p>Teams does have one — hold <kbd>⌥</kbd><kbd>Space</kbd> once you enable <em>Keyboard shortcut to unmute</em> in Settings › Privacy. So do Zoom and Google Meet. All three share a limit: they only respond while their own window is in front. MacMute's works from wherever you actually are, and mutes the device rather than the app.</p>
+
+  <h3>Is it free?</h3>
+  <p>Yes — free, open source, MIT licensed. No account, no subscription, no analytics and no network access.</p>
+
+  <h3>What permissions does it need?</h3>
+  <p>Muting needs none at all. <strong>Accessibility</strong> is only used to press the Mute button inside Teams; deny it and everything else still works, you simply lose the in-app indicator. MacMute never asks for microphone access, because it silences the device rather than listening to it.</p>
+
+  <p style="margin-top:22px"><a href="https://github.com/TuanBT/MacMute#faq">More answers in the README →</a></p>
+</section>
+
+</div>
+
+<footer class="wrap">
+  <p>MacMute is <a href="https://github.com/TuanBT/MacMute">open source</a> under the <a href="https://github.com/TuanBT/MacMute/blob/main/LICENSE">MIT licence</a>, by <a href="https://github.com/TuanBT">TuanBT</a>.</p>
+</footer>
+
+</body>
+</html>

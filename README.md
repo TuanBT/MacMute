@@ -65,6 +65,18 @@ Accessibility API is the remaining way to keep that indicator in sync.
 
 ## Install
 
+### Homebrew
+
+```bash
+brew tap tuanbt/tap
+brew install --cask --no-quarantine macmute
+```
+
+`--no-quarantine` is not optional: MacMute is signed ad-hoc rather than with a paid Apple
+Developer ID, and without it macOS blocks the first launch. Then skip to step 3 below.
+
+### Download
+
 1. Download the `.dmg` from the [latest release](https://github.com/TuanBT/MacMute/releases/latest)
    and drag **MacMute** into Applications.
 
