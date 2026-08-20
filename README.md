@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/menu.png" width="480" alt="MacMute menu in the macOS menu bar">
+  <img src="assets/menu.jpg" width="560" alt="The MacMute menu open in the macOS menu bar during a Microsoft Teams call">
 </p>
 
 Press <kbd>⌃</kbd><kbd>⌥</kbd><kbd>⌘</kbd><kbd>M</kbd> from any app and your mic goes quiet — no need to
