@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import MacMuteCore
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -12,6 +13,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var previewTimer: Timer?
     private var previewToneIsUnmute = false
 
+    /// Alive only between a press of the shortcut and whatever ends it, so the app
+    /// still has nothing running while you are not touching the keyboard.
+    private var hold = HoldGesture()
+    private var holdTimer: Timer?
+
     // MARK: - Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -20,7 +26,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu?.delegate = self
 
         HotKeyManager.shared.installHandler()
-        HotKeyManager.shared.onTrigger = { [weak self] in self?.toggleMute() }
+        HotKeyManager.shared.onTrigger = { [weak self] in self?.shortcutPressed() }
+        HotKeyManager.shared.onRelease = { [weak self] in self?.shortcutReleased() }
         HotKeyManager.shared.register(shortcut)
 
         // No polling anywhere: CoreAudio reports capture starting and stopping, and
@@ -31,6 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.render()
         }
         installSignalHandlers()
+        observeSessionInterruptions()
         render()
         Timing.note("accessibility trusted: \(TeamsAccessibility.isTrusted)")
         requestAccessibilityOnce()
@@ -38,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         HotKeyManager.shared.unregister()
+        stopHoldWatchdog()
         // A HAL mute outlives this process, so leaving one behind would kill the
         // microphone system wide with nothing in the macOS UI to explain it.
         audio.restoreOnExit()
@@ -60,13 +69,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Muting
 
+    /// The press edge of the shortcut. The toggle happens here, at the speed it always
+    /// had, and whether it stands is decided when the key comes back up — waiting to
+    /// find out would put the hold threshold in front of every mute.
+    private func shortcutPressed() {
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        Timing.note("press  \(modifierReport()) holdToTalk=\(Settings.holdToTalk)")
+        guard Settings.holdToTalk else { return toggleMute() }
+        let before = audio.isMuted
+        apply(!before, since: t0)
+        hold.began(stateBefore: before, at: ProcessInfo.processInfo.systemUptime)
+        startHoldWatchdog()
+    }
+
+    /// The release edge. A tap leaves the toggle standing; a hold hands the microphone
+    /// back to the state it was in before the key went down.
+    private func shortcutReleased() {
+        let now = ProcessInfo.processInfo.systemUptime
+        let elapsed = hold.held(at: now)
+        guard let outcome = hold.ended(at: now) else {
+            Timing.note("release with no press in flight")
+            return
+        }
+        Timing.note(String(format: "release after %.0f ms -> %@",
+                           (elapsed ?? 0) * 1000,
+                           outcome == .keep ? "tap, toggle stands" : "hold, reverting"))
+        stopHoldWatchdog()
+        settle(outcome)
+    }
+
+    /// Which modifiers are physically down right now.
+    ///
+    /// The tell for a remapped mouse button: software that synthesises ⌃⌥⌘M posts the
+    /// chord and drops it again in the same breath, so the hotkey fires with nothing
+    /// actually held down — which is also why the watchdog cannot trust its own reading
+    /// on that path.
+    private func modifierReport() -> String {
+        let down = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        var out = ""
+        if down.contains(.control) { out += "⌃" }
+        if down.contains(.option)  { out += "⌥" }
+        if down.contains(.shift)   { out += "⇧" }
+        if down.contains(.command) { out += "⌘" }
+        return "physical=[" + (out.isEmpty ? "none" : out) + "]"
+    }
+
+    @objc func toggleMute() {
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        // The menu names an absolute state, so a press still in flight has nothing left
+        // to say about it.
+        hold.cancel()
+        stopHoldWatchdog()
+        apply(!audio.isMuted, since: t0)
+    }
+
+    private func settle(_ outcome: HoldGesture.Outcome) {
+        guard case .revert(let previous) = outcome else { return }
+        apply(previous, since: DispatchTime.now().uptimeNanoseconds)
+    }
+
     /// The HAL runs first and synchronously, because it is the only layer that decides
     /// whether the microphone is actually live. Teams is told afterwards and is allowed
     /// to fail: the worst case is that its window shows the wrong indicator, never that
     /// the user believes they are muted while still being heard.
-    @objc func toggleMute() {
-        let t0 = DispatchTime.now().uptimeNanoseconds
-        let target = !audio.isMuted
+    ///
+    /// Teams is told on the hold edges too, and has to be: its Mute button is a second,
+    /// app-level mute, so a hold that opened the microphone without pressing it would
+    /// leave Teams still muted and the user talking to nobody.
+    ///
+    /// `t0` comes from the caller so the stopwatch still covers the state read that
+    /// chose `target`.
+    private func apply(_ target: Bool, since t0: UInt64) {
         let t1 = DispatchTime.now().uptimeNanoseconds
 
         // Play before unmuting and after muting, so the tone always happens while the
@@ -85,6 +158,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         render()
         let t5 = DispatchTime.now().uptimeNanoseconds
         Timing.log(target: target, marks: [t0, t1, t2, t3, t4, t5])
+    }
+
+    // MARK: - Hold watchdog
+
+    /// Runs only while the key is down, which is why the app can carry a timer at all
+    /// without giving up its idle cost.
+    ///
+    /// It exists because `kEventHotKeyReleased` is not a promise: releasing the
+    /// modifiers before the key swallows it, and a hold whose release never arrives
+    /// would leave the microphone in the borrowed state — the exact accident that
+    /// hold-to-talk is supposed to make impossible. Watching the modifiers is the
+    /// tighter of the two nets, since nobody is still holding ⌃⌥⌘M with Control up, and
+    /// the ceiling in `HoldGesture` catches what it cannot see: a shortcut bound to a
+    /// bare function key has no modifiers to watch.
+    private func startHoldWatchdog() {
+        stopHoldWatchdog()
+        holdTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            self?.checkHold()
+        }
+    }
+
+    private func stopHoldWatchdog() {
+        holdTimer?.invalidate()
+        holdTimer = nil
+    }
+
+    private func checkHold() {
+        guard hold.isHolding else { return stopHoldWatchdog() }
+
+        let required = shortcut.menuModifierMask
+        let down = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if !required.isEmpty, !down.isSuperset(of: required) {
+            Timing.note("hold: modifiers up without a release event")
+            endHold()
+            return
+        }
+
+        if let outcome = hold.expired(at: ProcessInfo.processInfo.systemUptime) {
+            Timing.note("hold: hit the \(Int(HoldGesture.maxHold))s ceiling")
+            stopHoldWatchdog()
+            settle(outcome)
+        }
+    }
+
+    /// Gives up on a press macOS is never going to report the end of, and returns the
+    /// microphone to where it was.
+    private func endHold() {
+        guard let outcome = hold.abandon() else { return }
+        stopHoldWatchdog()
+        settle(outcome)
+    }
+
+    /// Sleep, a locked screen and a switched session all take the keyboard away without
+    /// a release event. None of them may leave the microphone borrowed.
+    private func observeSessionInterruptions() {
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.willSleepNotification,
+                     NSWorkspace.screensDidSleepNotification,
+                     NSWorkspace.sessionDidResignActiveNotification] {
+            workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.endHold()
+            }
+        }
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main
+        ) { [weak self] _ in self?.endHold() }
     }
 
     // MARK: - Presentation
@@ -136,6 +275,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                 action: #selector(changeShortcut), keyEquivalent: "")
         change.target = self
         menu.addItem(change)
+
+        let holdItem = NSMenuItem(title: "Hold to Talk",
+                                  action: #selector(toggleHoldToTalk), keyEquivalent: "")
+        holdItem.target = self
+        holdItem.state = Settings.holdToTalk ? .on : .off
+        holdItem.toolTip = """
+            Tap the shortcut to toggle, as usual. Hold it and the microphone only \
+            changes for as long as the key is down: push-to-talk while muted, \
+            push-to-mute while live.
+            """
+        menu.addItem(holdItem)
         menu.addItem(.separator())
 
         let sound = NSMenuItem(title: "Sound", action: nil, keyEquivalent: "")
@@ -200,7 +350,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Menu actions
 
+    @objc private func toggleHoldToTalk() {
+        Settings.holdToTalk.toggle()
+        // Switching it off mid-press leaves a hold nothing will ever end.
+        if !Settings.holdToTalk { endHold() }
+    }
+
     @objc private func changeShortcut() {
+        // Rebinding unregisters the key that is being held, so its release is gone.
+        endHold()
         ShortcutRecorder.present(current: shortcut) { [weak self] new in
             guard let self, let new else { return }
             guard HotKeyManager.shared.register(new) else {

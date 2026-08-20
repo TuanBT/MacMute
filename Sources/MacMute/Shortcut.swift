@@ -115,18 +115,36 @@ final class HotKeyManager {
     private var handlerRef: EventHandlerRef?
     var onTrigger: (() -> Void)?
 
+    /// The key coming back up. Carbon posts this as well as the press, which is what
+    /// makes hold-to-talk possible without a CGEventTap and the extra permission one
+    /// would cost. It is not guaranteed to arrive — releasing the modifiers before the
+    /// key can swallow it — so nothing may depend on it alone.
+    var onRelease: (() -> Void)?
+
     private init() {}
 
     func installHandler() {
-        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
-                                 eventKind: UInt32(kEventHotKeyPressed))
-        let callback: EventHandlerUPP = { _, _, userData in
+        let specs = [
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                          eventKind: UInt32(kEventHotKeyPressed)),
+            EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                          eventKind: UInt32(kEventHotKeyReleased)),
+        ]
+        let callback: EventHandlerUPP = { _, event, userData in
             guard let userData else { return noErr }
-            Unmanaged<HotKeyManager>.fromOpaque(userData).takeUnretainedValue().onTrigger?()
+            let manager = Unmanaged<HotKeyManager>.fromOpaque(userData).takeUnretainedValue()
+            if GetEventKind(event) == UInt32(kEventHotKeyReleased) {
+                manager.onRelease?()
+            } else {
+                manager.onTrigger?()
+            }
             return noErr
         }
-        InstallEventHandler(GetApplicationEventTarget(), callback, 1, &spec,
-                            Unmanaged.passUnretained(self).toOpaque(), &handlerRef)
+        specs.withUnsafeBufferPointer { buffer in
+            _ = InstallEventHandler(GetApplicationEventTarget(), callback, buffer.count,
+                                    buffer.baseAddress,
+                                    Unmanaged.passUnretained(self).toOpaque(), &handlerRef)
+        }
     }
 
     @discardableResult

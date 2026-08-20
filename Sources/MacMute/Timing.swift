@@ -22,10 +22,22 @@ enum Timing {
     }
 
     /// One-off diagnostic line, same gate as the stopwatch.
+    ///
+    /// Stamped, because the questions worth asking of this log are about spacing: a
+    /// remapped mouse button that fires the shortcut twice looks identical to two
+    /// deliberate presses until you can see they were 8 ms apart.
     static func note(_ message: String) {
         guard enabled else { return }
-        FileHandle.standardError.write(Data((message + "\n").utf8))
+        FileHandle.standardError.write(Data((stamp() + " " + message + "\n").utf8))
     }
+
+    private static let clock: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter
+    }()
+
+    private static func stamp() -> String { clock.string(from: Date()) }
 
     private static func ms(_ from: UInt64, _ to: UInt64) -> Double {
         Double(to - from) / 1_000_000

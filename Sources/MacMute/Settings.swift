@@ -6,6 +6,7 @@ enum Settings {
     private static let askedKey = "askedForAccessibility"
     private static let iconStyleKey = "iconStyle"
     private static let soundPackKey = "soundPack"
+    private static let holdKey = "holdToTalk"
 
     static var shortcut: Shortcut {
         get {
@@ -44,6 +45,13 @@ enum Settings {
             return value
         }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: soundPackKey) }
+    }
+
+    /// Off by default: it changes what an existing muscle-memory press does when it
+    /// runs long, and nobody should discover that during a meeting.
+    static var holdToTalk: Bool {
+        get { UserDefaults.standard.bool(forKey: holdKey) }
+        set { UserDefaults.standard.set(newValue, forKey: holdKey) }
     }
 
     /// So the permission is asked for once, at the moment it would first have made a
