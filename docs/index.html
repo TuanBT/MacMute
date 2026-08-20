@@ -177,9 +177,9 @@ footer a { color: var(--muted); }
 
 <section>
   <h2>Install</h2>
-  <pre><code>brew tap tuanbt/tap
-brew install --cask --no-quarantine macmute</code></pre>
-  <p style="margin-top:14px" class="req"><code>--no-quarantine</code> matters: MacMute is signed ad-hoc rather than with a paid Apple Developer ID, so without it macOS blocks the first launch. Prefer a download? Grab the <code>.dmg</code> from the <a href="https://github.com/TuanBT/MacMute/releases/latest">latest release</a>.</p>
+  <p>Download the <code>.dmg</code> from the <a href="https://github.com/TuanBT/MacMute/releases/latest">latest release</a>, open it, and drag <strong>MacMute</strong> into Applications. Then clear the quarantine flag once:</p>
+  <pre><code>xattr -cr /Applications/MacMute.app</code></pre>
+  <p style="margin-top:14px" class="req">MacMute is signed ad-hoc rather than with a paid Apple Developer ID, so macOS blocks the first launch until you do this. Rather not touch Terminal? Open MacMute, let it be blocked, then go to <strong>System Settings &rsaquo; Privacy &amp; Security</strong> and click <strong>Open Anyway</strong>.</p>
 </section>
 
 <section>
