@@ -18,11 +18,6 @@
     <string>__VERSION__</string>
     <key>CFBundleVersion</key>
     <string>__BUILD__</string>
-    <key>NSAppTransportSecurity</key>
-    <dict>
-        <key>NSAllowsLocalNetworking</key>
-        <true/>
-    </dict>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>
