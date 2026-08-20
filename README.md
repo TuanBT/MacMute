@@ -73,7 +73,7 @@ brew install --cask --no-quarantine macmute
 ```
 
 `--no-quarantine` is not optional: MacMute is signed ad-hoc rather than with a paid Apple
-Developer ID, and without it macOS blocks the first launch. Then skip to step 3 below.
+Developer ID, and without it macOS blocks the first launch.
 
 ### Download
 
@@ -90,9 +90,15 @@ Developer ID, and without it macOS blocks the first launch. Then skip to step 3 
    Alternatively: open MacMute, let it be blocked, then go to
    **System Settings › Privacy & Security** and click **Open Anyway**.
 
-3. On first launch, macOS asks for **Accessibility** permission. Grant it so MacMute can
-   press the Mute button inside Teams. If you deny it, muting still works — you just lose
-   the visible mute indicator in Teams.
+### First launch
+
+However you installed it, macOS asks for **Accessibility** permission the first time you
+open MacMute. Grant it so MacMute can press the Mute button inside Teams. Deny it and
+muting still works — you only lose the visible mute indicator in Teams.
+
+The ad-hoc signature changes on every release, so when upgrading, remove the old MacMute
+entry from **System Settings › Privacy & Security › Accessibility** before granting it
+again.
 
 ## Menu bar icon
 
