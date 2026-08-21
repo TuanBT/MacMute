@@ -286,6 +286,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             push-to-mute while live.
             """
         menu.addItem(holdItem)
+
+        let force = NSMenuItem(title: "Force Unmute All Devices",
+                               action: #selector(forceUnmute), keyEquivalent: "")
+        force.target = self
+        force.toolTip = "Clears the mute on every input device, whatever put it there. For a microphone that is silent with nothing in macOS to explain it."
+        menu.addItem(force)
         menu.addItem(.separator())
 
         let sound = NSMenuItem(title: "Sound", action: nil, keyEquivalent: "")
@@ -349,6 +355,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: - Menu actions
+
+    /// The escape hatch. Unlike Unmute this does not consult a baseline, because the
+    /// case it exists for is the one where the baseline is the thing that is wrong.
+    @objc private func forceUnmute() {
+        hold.cancel()
+        stopHoldWatchdog()
+        audio.forceUnmuteEverything()
+        teamsAX.setMuted(false)
+        render()
+    }
 
     @objc private func toggleHoldToTalk() {
         Settings.holdToTalk.toggle()

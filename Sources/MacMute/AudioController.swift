@@ -47,7 +47,8 @@ final class AudioController: AudioBackend {
     private var cache: [UInt32: CachedDevice] = [:]
     private var order: [UInt32] = []
     private var activityListeners: [AudioDeviceID: AudioObjectPropertyListenerBlock] = [:]
-    private var volumeGuards: [AudioDeviceID: AudioObjectPropertyListenerBlock] = [:]
+    private var volumeGuards: [AudioDeviceID: (block: AudioObjectPropertyListenerBlock,
+                                               address: AudioObjectPropertyAddress)] = [:]
 
     init() {
         refreshCache()
@@ -55,7 +56,11 @@ final class AudioController: AudioBackend {
         engine.onBaselineChange = { [weak self] baseline in self?.persist(baseline) }
         engine.seedDeafDevices(Set(UserDefaults.standard.stringArray(forKey: Self.deafKey) ?? []))
         engine.onDeafDevicesChange = { uids in
-            UserDefaults.standard.set(Array(uids).sorted(), forKey: Self.deafKey)
+            // Per-process aggregates carry the client's pid in their UID, so they never
+            // recur and remembering one helps nobody. Left in, the list grew by a few
+            // entries every session and was never read usefully again.
+            let durable = uids.filter { !$0.hasPrefix("CADefaultDeviceAggregate-") }
+            UserDefaults.standard.set(durable.sorted(), forKey: Self.deafKey)
         }
         recoverFromCrashIfNeeded()
         observeDeviceList()
@@ -87,8 +92,24 @@ final class AudioController: AudioBackend {
     /// that set it, so skipping this leaves the microphone dead with nothing in the
     /// macOS UI to explain it.
     func restoreOnExit() {
-        guard engine.isMuted else { return }
+        // `isMuted` is not the question. A device can be wearing a mute of ours while
+        // the app believes the microphone is live, and that is precisely the state that
+        // must not be allowed to outlive the process. A baseline still holding entries
+        // means a restore is owed, whatever the flag says.
+        guard engine.isMuted || !engine.baseline.isEmpty else { return }
         engine.setMuted(false)
+    }
+
+    /// Clears the mute on every input device, whatever put it there, and forgets the
+    /// devices that only ever ignored us. The escape hatch for a microphone that is
+    /// silent with nothing in the macOS UI to explain it.
+    func forceUnmuteEverything() {
+        engine.setMuted(false)
+        for id in order {
+            stopVolumeGuard(id)
+            _ = setMute(id, false)
+            if let level = volume(of: id), level <= 0.0001 { _ = setVolume(id, 1.0) }
+        }
     }
 
     // MARK: - AudioBackend
@@ -164,7 +185,7 @@ final class AudioController: AudioBackend {
             _ = self.setVolume(id, 0)
         }
         if AudioObjectAddPropertyListenerBlock(id, &address, DispatchQueue.main, block) == noErr {
-            volumeGuards[id] = block
+            volumeGuards[id] = (block, address)
         }
     }
 
@@ -181,10 +202,13 @@ final class AudioController: AudioBackend {
     }
 
     func stopVolumeGuard(_ id: UInt32) {
-        guard let block = volumeGuards.removeValue(forKey: id),
-              let first = cache[id]?.volumeTargets.first else { return }
-        var address = volumeAddress(first)
-        AudioObjectRemovePropertyListenerBlock(id, &address, DispatchQueue.main, block)
+        // The address is kept alongside the block. Looking it up in the cache again
+        // failed for any device that had already left the cache, and because the entry
+        // was removed first the listener then stayed registered for good — bound to an
+        // id CoreAudio is free to hand to a different device.
+        guard let guarded = volumeGuards.removeValue(forKey: id) else { return }
+        var address = guarded.address
+        AudioObjectRemovePropertyListenerBlock(id, &address, DispatchQueue.main, guarded.block)
     }
 
     // MARK: - Persistence

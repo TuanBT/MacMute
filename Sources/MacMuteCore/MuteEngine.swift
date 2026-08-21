@@ -109,36 +109,63 @@ public final class MuteEngine {
 
         // Reading a baseline is two more round trips per device, so the idle ones are
         // read in the deferred pass, immediately before they are written.
-        if muted, baseline.isEmpty {
+        //
+        // Every mute records what it finds, not only the first one. Skipping this
+        // whenever the baseline merely happened to be non-empty left a device muted with
+        // nothing written down, and the next pass then read that mute back and recorded
+        // it as the state the user had chosen — cementing it. `recordBaseline` already
+        // declines to overwrite an entry, so the check this replaces bought nothing else.
+        if muted {
             for device in urgent { recordBaseline(device) }
         }
 
-        let snapshot = baseline
+        let snapshot = currentBaseline()
         var anyApplied = false
-        for device in urgent where drive(muted, device, snapshot) { anyApplied = true }
+        var restored: [String] = []
+        for device in urgent {
+            guard drive(muted, device, snapshot) else { continue }
+            anyApplied = true
+            if !muted { restored.append(device.uid) }
+        }
 
         let deferred = rest
         backend.deferWork { [weak self] in
-            guard let self, self.isCurrent(epoch) else { return }
+            guard let self else { return }
             guard muted else {
-                // `snapshot` was taken before setMuted cleared the baseline, which is
-                // the only copy of what these devices looked like.
-                for device in deferred { _ = self.drive(false, device, snapshot) }
+                // `snapshot` was taken before setMuted forgot these devices, and is the
+                // only copy of what they looked like.
+                var done: [String] = []
+                for device in deferred {
+                    guard self.isCurrent(epoch) else { break }
+                    if self.drive(false, device, snapshot) { done.append(device.uid) }
+                }
+                self.forget(done)
+                self.publishBaseline()
                 return
             }
-            for device in deferred { self.recordBaseline(device) }
+            // The generation is re-read before every write rather than once on entry.
+            // A pass that only checked at the top kept muting devices after an unmute
+            // had already put them back, leaving them silent with the app — and every
+            // indicator in macOS — reporting a live microphone.
+            for device in deferred {
+                guard self.isCurrent(epoch) else { return }
+                self.recordBaseline(device)
+            }
+            guard self.isCurrent(epoch) else { return }
             // Publish before writing: a crash between the two would otherwise leave
             // these devices muted with nothing on disk to undo them.
             self.publishBaseline()
             let saved = self.currentBaseline()
-            for device in deferred { _ = self.drive(true, device, saved) }
+            for device in deferred {
+                guard self.isCurrent(epoch) else { return }
+                _ = self.drive(true, device, saved)
+            }
         }
 
-        if !muted {
-            lock.lock()
-            baseline.removeAll()
-            lock.unlock()
-        }
+        // Bug B: only devices actually put back are forgotten. One that could not be
+        // reached — unplugged, asleep, gone with the app that summoned it — keeps its
+        // entry, so there is still something to restore it with when it returns.
+        if !muted { forget(restored) }
         isMuted = muted
         publishBaseline()
 
@@ -157,20 +184,55 @@ public final class MuteEngine {
         }
         var applied = false
         if device.muteSettable, backend.setMute(device.id, saved.muted) { applied = true }
-        if let volume = saved.volume, backend.setVolume(device.id, volume) { applied = true }
+        if let volume = saved.volume {
+            if backend.setVolume(device.id, volume) { applied = true }
+        } else if let current = backend.volume(of: device.id), current <= 0.0001 {
+            // The level never reached the baseline — a device still negotiating its link
+            // answers one read and not the next — and it is sitting at zero, which only
+            // we would have done. Left there it is a dead microphone that the mute flag,
+            // Teams and the menu bar all agree is live.
+            if backend.setVolume(device.id, 1.0) { applied = true }
+        }
         return applied
+    }
+
+    /// Drops the entries for devices that are demonstrably back the way we found them.
+    /// Everything else keeps its entry: it is the only record that a restore is owed.
+    private func forget(_ uids: [String]) {
+        guard !uids.isEmpty else { return }
+        lock.lock()
+        for uid in uids { baseline.removeValue(forKey: uid) }
+        lock.unlock()
     }
 
     /// Mutes anything that arrived while we were already muted, so plugging in a
     /// headset does not silently hand back a live microphone.
     public func adoptNewDevices() {
-        guard isMuted else { return }
-        for device in backend.inputDevices() where baseline[device.uid] == nil {
-            baseline[device.uid] = Baseline(muted: backend.mute(of: device.id) ?? false,
-                                            volume: backend.volume(of: device.id))
-            _ = apply(muted: true, to: device)
+        let devices = backend.inputDevices()
+        let known = currentBaseline()
+
+        guard isMuted else {
+            // Not muted, so anything still carrying an entry is a device that was away
+            // when the unmute ran. It has come back still wearing our mute and nothing
+            // else is ever going to take it off.
+            guard !known.isEmpty else { return }
+            var done: [String] = []
+            for device in devices where known[device.uid] != nil {
+                if drive(false, device, known) { done.append(device.uid) }
+            }
+            guard !done.isEmpty else { return }
+            forget(done)
+            publishBaseline()
+            return
         }
-        onBaselineChange?(baseline)
+
+        var adopted = false
+        for device in devices where known[device.uid] == nil {
+            recordBaseline(device)
+            _ = apply(muted: true, to: device)
+            adopted = true
+        }
+        if adopted { publishBaseline() }
     }
 
     /// Puts back a baseline recovered from disk after the process was killed while muted.
@@ -189,8 +251,12 @@ public final class MuteEngine {
     }
 
     private func recordBaseline(_ device: AudioDeviceInfo) {
-        let entry = Baseline(muted: backend.mute(of: device.id) ?? false,
-                             volume: backend.volume(of: device.id))
+        // A device still bringing its link up answers one read and not the next, and a
+        // baseline with no level in it has nothing to put back. One retry is cheap and
+        // it is the difference between restoring the level the user had and guessing.
+        var level = backend.volume(of: device.id)
+        if level == nil, device.hasWritableVolume { level = backend.volume(of: device.id) }
+        let entry = Baseline(muted: backend.mute(of: device.id) ?? false, volume: level)
         lock.lock()
         if baseline[device.uid] == nil { baseline[device.uid] = entry }
         lock.unlock()
@@ -240,7 +306,11 @@ public final class MuteEngine {
             if muted { markDeaf(device.uid) }
             return false
         }
-        guard muted else { return backend.setVolume(device.id, volume) }
+        guard muted else {
+            // Writing back the level just read is a no-op that reports success, and when
+            // that level is zero the microphone stays dead while the call returns true.
+            return backend.setVolume(device.id, volume <= 0.0001 ? 1.0 : volume)
+        }
 
         _ = backend.setVolume(device.id, 0)
         guard let readback = backend.volume(of: device.id), readback <= 0.0001 else {
