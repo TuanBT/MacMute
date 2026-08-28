@@ -54,6 +54,11 @@ Accessibility API is the remaining way to keep that indicator in sync.
   a different input device
 - **Teams mute indicator sync** — presses the real Mute button inside the Teams window
   (requires Accessibility permission)
+- **Follows Teams when a call starts** — a call joins with its own mute state, decided by
+  Teams and knowing nothing about the mute left over from the last one. MacMute reads the
+  Teams button once, at that moment, and matches the microphone to it, so the first press
+  of the shortcut moves both instead of spending itself putting them back in step. On by
+  default; switch it off in the menu
 - **Works with all apps** — Zoom, Meet, Slack, Discord, FaceTime, and more
 - **Audio feedback** — four sound styles (Click, Soft, Marimba, Chime) or off; falling tone
   for mute, rising for unmute. Hover over each option to preview the sound live

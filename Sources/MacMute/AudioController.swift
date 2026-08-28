@@ -24,6 +24,15 @@ final class AudioController: AudioBackend {
     /// devices changes. This is what turns the menu bar icon green.
     var onInputActivityChange: (() -> Void)?
 
+    /// Fires when a device that nothing was capturing from starts being captured. That
+    /// edge is what a meeting starting looks like from here, and it is the moment worth
+    /// asking Teams what it thinks its own mute state is.
+    ///
+    /// Separate from `onInputActivityChange`, which also fires for capture stopping and
+    /// for the device list changing, and which stays true throughout when a second app
+    /// joins a microphone that was already open.
+    var onCaptureStarted: (() -> Void)?
+
     /// What each device can do, resolved once per device-list change. Probing this on
     /// every keypress cost tens of milliseconds against about 1.5 ms for the writes.
     private struct CachedDevice {
@@ -84,8 +93,10 @@ final class AudioController: AudioBackend {
     private var capturingDevices: Set<UInt32> = []
 
     private func refreshInputActivity() {
+        let previous = capturingDevices
         capturingDevices = Set(order.filter { isRunning($0) })
         isInputActive = !capturingDevices.isEmpty
+        if !capturingDevices.subtracting(previous).isEmpty { onCaptureStarted?() }
     }
 
     /// Called on quit and from the signal handlers. A HAL mute outlives the process

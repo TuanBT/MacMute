@@ -41,13 +41,66 @@ final class TeamsAccessibility {
     private var cachedButton: AXUIElement?
     private var cooldownUntil = Date.distantPast
 
+    /// Bumped by anything that makes a pending read stale. Queue confined, like every
+    /// other field here.
+    private var readEpoch = 0
+
     /// True once the user has granted Accessibility. Never prompts.
     static var isTrusted: Bool { AXIsProcessTrusted() }
 
     /// Best effort, fire and forget. Returns immediately.
     func setMuted(_ muted: Bool) {
         guard Self.isTrusted else { return }
-        queue.async { [weak self] in self?.press(target: muted) }
+        queue.async { [weak self] in
+            guard let self else { return }
+            // A press is the user saying where they want to be. A read still in flight
+            // from a call that just started must not land on top of it a second later
+            // and undo it.
+            self.readEpoch += 1
+            self.press(target: muted)
+        }
+    }
+
+    /// Reads what Teams itself shows, so the app can follow Teams instead of only ever
+    /// pushing at it.
+    ///
+    /// A call starting is the one moment the two are guaranteed to disagree: Teams
+    /// joins with whatever mute state its own settings and the meeting decide, knowing
+    /// nothing about the mute this app was still holding from the last call. Left
+    /// disagreeing, the next press of the shortcut spends itself moving the half that
+    /// was already where the user wanted it — which is why it took two.
+    ///
+    /// The meeting toolbar is not there the instant capture starts, so this retries
+    /// within `window` and simply never answers when no mute button ever appears: no
+    /// call in progress, Teams not running, or no Accessibility permission. The
+    /// completion runs on the main queue, at most once.
+    func readMuted(within window: TimeInterval = 8, _ completion: @escaping (Bool) -> Void) {
+        guard Self.isTrusted else { return }
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.readEpoch += 1
+            self.attemptRead(self.readEpoch, until: Date().addingTimeInterval(window),
+                             after: 0.4, completion)
+        }
+    }
+
+    private func attemptRead(_ epoch: Int, until deadline: Date, after delay: TimeInterval,
+                             _ completion: @escaping (Bool) -> Void) {
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, epoch == self.readEpoch else { return }
+            // A call starting is exactly what a cooldown left over from the last failed
+            // scan would hide, and the one moment a scan is certainly worth paying for.
+            self.cooldownUntil = .distantPast
+            if let button = self.resolveButton(), let label = self.label(of: button) {
+                // Same reading as the press path: the label names the action, so
+                // "unmute mic" means Teams is muted right now.
+                let muted = label.contains("unmute")
+                DispatchQueue.main.async { completion(muted) }
+                return
+            }
+            guard Date() < deadline else { return }
+            self.attemptRead(epoch, until: deadline, after: 1.5, completion)
+        }
     }
 
     // MARK: - Work, entirely off the main thread

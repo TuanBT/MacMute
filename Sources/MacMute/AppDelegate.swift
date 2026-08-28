@@ -31,12 +31,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         HotKeyManager.shared.register(shortcut)
 
         // No polling anywhere: CoreAudio reports capture starting and stopping, and
-        // Teams pushes its own state down the socket.
+        // Teams is only ever asked on the one edge that can have changed its answer.
         audio.onInputActivityChange = { [weak self] in
             guard let self else { return }
             if self.audio.isInputActive { self.feedback.warmUp() }
             self.render()
         }
+        audio.onCaptureStarted = { [weak self] in self?.followTeams() }
         installSignalHandlers()
         observeSessionInterruptions()
         render()
@@ -158,6 +159,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         render()
         let t5 = DispatchTime.now().uptimeNanoseconds
         Timing.log(target: target, marks: [t0, t1, t2, t3, t4, t5])
+    }
+
+    // MARK: - Following Teams
+
+    /// Takes Teams' own mute state as the truth, once, when a call starts.
+    ///
+    /// Teams decides that state for itself when it joins — its settings, the meeting's,
+    /// and nothing at all about the mute this app was left holding when the last call
+    /// ended. Whichever of the two is right, they have to agree: while they do not, the
+    /// microphone is either dead behind a Teams that shows you live, or live behind a
+    /// mute you think you still have, and the first press of the shortcut goes to
+    /// moving the half that was already correct.
+    ///
+    /// Teams is believed here and only here. It is the side other participants can see,
+    /// and a call starting is the one moment where nothing the user did with the
+    /// shortcut is being overruled — any press cancels a read still in flight.
+    private func followTeams() {
+        guard Settings.followTeamsOnCallStart else { return }
+        teamsAX.readMuted { [weak self] teamsMuted in
+            guard let self, teamsMuted != self.audio.isMuted else { return }
+            Timing.note("call started with Teams \(teamsMuted ? "muted" : "live"), following it")
+            // Teams is already where it says it is, so it is not told anything back.
+            self.audio.setMuted(teamsMuted)
+            self.render()
+        }
     }
 
     // MARK: - Hold watchdog
@@ -287,6 +313,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             """
         menu.addItem(holdItem)
 
+        let follow = NSMenuItem(title: "Follow Teams on Call Start",
+                                action: #selector(toggleFollowTeams), keyEquivalent: "")
+        follow.target = self
+        follow.state = Settings.followTeamsOnCallStart ? .on : .off
+        follow.toolTip = """
+            When a Teams call starts, match the microphone to what the Teams Mute \
+            button already shows, so the first press of the shortcut moves both \
+            instead of putting them right. Requires Accessibility.
+            """
+        menu.addItem(follow)
+
         let force = NSMenuItem(title: "Force Unmute All Devices",
                                action: #selector(forceUnmute), keyEquivalent: "")
         force.target = self
@@ -364,6 +401,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         audio.forceUnmuteEverything()
         teamsAX.setMuted(false)
         render()
+    }
+
+    @objc private func toggleFollowTeams() {
+        Settings.followTeamsOnCallStart.toggle()
     }
 
     @objc private func toggleHoldToTalk() {
