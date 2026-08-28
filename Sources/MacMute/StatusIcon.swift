@@ -2,100 +2,74 @@ import AppKit
 
 /// Draws the menu bar icon.
 ///
-/// Three states, with colour carrying the meaning at a glance:
-///   - nothing is listening: plain template glyph, follows the menu bar like any other
-///     icon and stays out of the way
-///   - a microphone is live: green, because this is the state where speaking reaches
-///     other people
-///   - muted: red
+/// Four states, one glyph, one size. Colour answers "does this matter right now" and
+/// the slash answers "what is true":
 ///
-/// The idle state is always a template glyph. Only the two coloured states have a
-/// style, because those are the ones that have to be read in a hurry and taste differs
-/// on how loudly they should say it.
+///   - idle: nothing is listening, microphone free
+///   - mutedIdle: nothing is listening, and the mute is still on for when something does
+///   - live: a microphone is open — this is where speaking reaches other people
+///   - muted: something is listening and hearing silence
+///
+/// The two waiting states drop the colour and keep the slash. Nobody can hear you
+/// either way, so a red icon there is an alarm about nothing — half an hour after a
+/// meeting it says only that the app is still muted, which is when it is least worth
+/// shouting — while the slash is still the fact, and the one thing that explains the
+/// silence the next app to open the microphone will get.
+///
+/// Every state is the same symbol at the same point size, differing only in colour and
+/// in the slash, because an icon that changes weight or height as it switches reads as
+/// the icon jumping rather than as the microphone changing. That is also why all four
+/// are filled: an outline glyph next to a filled one looks like the smaller of the two
+/// even when the two measure the same.
 enum StatusIcon {
 
     enum State {
         case idle       // no app is capturing
+        case mutedIdle  // no app is capturing, and the microphone is muted
         case live       // a microphone is open
         case muted
-    }
 
-    enum Style: String, CaseIterable {
-        /// No block at all: just the glyph, tinted. Closest to macOS convention, and
-        /// the default — a filled block reads as a system alert rather than an app.
-        case glyph
-        /// A filled block the full height of the icon. Loudest, and heaviest.
-        case badge
-
-        var title: String {
+        var symbolName: String {
             switch self {
-            case .badge: return "Filled Badge"
-            case .glyph: return "Coloured Icon"
+            case .muted, .mutedIdle: return "mic.slash.fill"
+            case .live, .idle: return "mic.fill"
+            }
+        }
+
+        /// nil where the icon is a template and follows the menu bar like any other.
+        var colour: NSColor? {
+            switch self {
+            case .live: return .systemGreen
+            case .muted: return .systemRed
+            case .idle, .mutedIdle: return nil
             }
         }
     }
 
-    private static let canvas = NSSize(width: 22, height: 20)
-    private static var cache: [String: NSImage] = [:]
+    /// One point size for all four, and the size the coloured states have always been
+    /// drawn at, so nothing moves for anyone already running MacMute.
+    private static let glyphSize: CGFloat = 13
+    private static var cache: [State: NSImage] = [:]
 
-    static func image(for state: State, style: Style, description: String) -> NSImage? {
-        let key = "\(state)-\(style.rawValue)"
-        if let cached = cache[key] {
+    static func image(for state: State, description: String) -> NSImage? {
+        if let cached = cache[state] {
             cached.accessibilityDescription = description
             return cached
         }
-        guard let image = render(state: state, style: style, description: description)
-        else { return nil }
-        cache[key] = image
+        guard let image = render(state: state, description: description) else { return nil }
+        cache[state] = image
         return image
     }
 
-    private static func render(state: State, style: Style, description: String) -> NSImage? {
-        guard state != .idle else {
-            let image = NSImage(systemSymbolName: "mic", accessibilityDescription: description)
-            image?.isTemplate = true
-            return image
+    private static func render(state: State, description: String) -> NSImage? {
+        guard let symbol = symbolImage(state.symbolName, size: glyphSize, weight: .regular)
+        else { return nil }
+        guard let colour = state.colour else {
+            symbol.isTemplate = true
+            symbol.accessibilityDescription = description
+            return symbol
         }
-
-        let symbol = state == .muted ? "mic.slash.fill" : "mic.fill"
-        let colour: NSColor = state == .muted ? .systemRed : .systemGreen
-
-        switch style {
-        case .badge:
-            return badge(symbol: symbol, colour: colour, description: description,
-                         box: NSSize(width: 19, height: 17), corner: 4.5,
-                         glyphSize: 11, weight: .semibold)
-
-        case .glyph:
-            guard let raw = symbolImage(state == .muted ? "mic.slash.fill" : "mic.fill",
-                                        size: 13, weight: .regular) else { return nil }
-            let image = recoloured(raw, colour)
-            image.accessibilityDescription = description
-            return image
-        }
-    }
-
-    private static func badge(symbol: String, colour: NSColor, description: String,
-                              box: NSSize, corner: CGFloat,
-                              glyphSize: CGFloat, weight: NSFont.Weight) -> NSImage? {
-        guard let raw = symbolImage(symbol, size: glyphSize, weight: weight) else { return nil }
-        let white = recoloured(raw, .white)
-
-        let image = NSImage(size: canvas, flipped: false) { rect in
-            colour.setFill()
-            let block = NSRect(x: (rect.width - box.width) / 2,
-                               y: (rect.height - box.height) / 2,
-                               width: box.width, height: box.height)
-            NSBezierPath(roundedRect: block, xRadius: corner, yRadius: corner).fill()
-
-            let size = white.size
-            white.draw(in: NSRect(x: (rect.width - size.width) / 2,
-                                  y: (rect.height - size.height) / 2,
-                                  width: size.width, height: size.height),
-                       from: .zero, operation: .sourceOver, fraction: 1.0)
-            return true
-        }
-        image.isTemplate = false
+        let image = recoloured(symbol, colour)
         image.accessibilityDescription = description
         return image
     }
@@ -106,9 +80,10 @@ enum StatusIcon {
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: size, weight: weight))
     }
 
-    /// Repaints a symbol on its own transparent canvas. Compositing colour straight
-    /// onto the badge would key off the badge's alpha, which is opaque everywhere, and
-    /// flood the whole block.
+    /// Repaints a symbol on its own canvas, the same size as the symbol, so a coloured
+    /// state and a template state occupy exactly the same box. Compositing the colour
+    /// straight over the glyph would key off the canvas alpha, which is opaque
+    /// everywhere, and flood the whole rectangle.
     private static func recoloured(_ symbol: NSImage, _ colour: NSColor) -> NSImage {
         let image = NSImage(size: symbol.size, flipped: false) { rect in
             colour.set()

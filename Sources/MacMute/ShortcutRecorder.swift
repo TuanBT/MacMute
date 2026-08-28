@@ -1,14 +1,31 @@
 import AppKit
 
-/// Small modal panel that captures the next key combination the user presses.
+/// The settings panel: captures the next key combination the user presses, and carries
+/// everything that is decided once and then left alone.
+///
+/// The menu is what you open mid-meeting to mute, so what stays in it is the mute, the
+/// things you genuinely change between calls, and the way out. What lives here instead
+/// is set-and-forget: the shortcut itself, whether the shortcut can be held, and the
+/// escape hatch for a microphone that has gone silent with nothing in macOS to explain
+/// it — worth keeping, worth being able to find, and not worth a line above Quit.
 final class ShortcutRecorder {
+
+    /// What the panel is allowed to do to the running app. Closures rather than a
+    /// delegate: there are three of them and they are all one line.
+    struct Actions {
+        var setHoldToTalk: (Bool) -> Void
+        var forceUnmute: () -> Void
+    }
+
     private static var shared: ShortcutRecorder?
 
     private var window: NSWindow?
     private var keyMonitor: Any?
     private var flagsMonitor: Any?
     private var completion: ((Shortcut?) -> Void)?
+    private var actions: Actions?
     private let promptLabel = NSTextField(labelWithString: "")
+    private let forceButton = NSButton(title: "Force Unmute All Devices", target: nil, action: nil)
     private var currentShortcut: Shortcut?
     private var originalColor: NSColor = .labelColor
 
@@ -19,22 +36,26 @@ final class ShortcutRecorder {
         return "\(short) (build \(build))"
     }
 
-    static func present(current: Shortcut, completion: @escaping (Shortcut?) -> Void) {
+    static func present(current: Shortcut, holdToTalk: Bool, actions: Actions,
+                        completion: @escaping (Shortcut?) -> Void) {
         shared?.close(with: nil)
         let recorder = ShortcutRecorder()
         shared = recorder
-        recorder.show(current: current, completion: completion)
+        recorder.show(current: current, holdToTalk: holdToTalk, actions: actions,
+                      completion: completion)
     }
 
-    private func show(current: Shortcut, completion: @escaping (Shortcut?) -> Void) {
+    private func show(current: Shortcut, holdToTalk: Bool, actions: Actions,
+                      completion: @escaping (Shortcut?) -> Void) {
         self.completion = completion
+        self.actions = actions
         self.currentShortcut = current
 
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 380, height: 200),
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 380, height: 380),
                             styleMask: [.titled, .closable],
                             backing: .buffered,
                             defer: false)
-        panel.title = "Change Shortcut"
+        panel.title = "MacMute Settings"
         panel.isFloatingPanel = true
         panel.level = .floating
         panel.center()
@@ -58,9 +79,42 @@ final class ShortcutRecorder {
         resetButton.controlSize = .small
         resetButton.font = .systemFont(ofSize: 11)
 
-        let stack = NSStackView(views: [title, promptLabel, hint, resetButton])
+        let holdCheckbox = NSButton(checkboxWithTitle: "Hold to Talk", target: self,
+                                    action: #selector(toggleHoldToTalk(_:)))
+        holdCheckbox.state = holdToTalk ? .on : .off
+
+        let holdHint = NSTextField(wrappingLabelWithString:
+            "Tap the shortcut to toggle, as usual. Hold it and the microphone only "
+            + "changes while the key is down: push-to-talk while muted, push-to-mute "
+            + "while live.")
+        holdHint.font = .systemFont(ofSize: 11)
+        holdHint.textColor = .secondaryLabelColor
+        holdHint.alignment = .center
+        holdHint.preferredMaxLayoutWidth = 320
+
+        forceButton.target = self
+        forceButton.action = #selector(forceUnmuteEverything)
+        forceButton.bezelStyle = .rounded
+
+        let forceHint = NSTextField(wrappingLabelWithString:
+            "Clears the mute on every input device, whatever put it there. For a "
+            + "microphone that is silent with nothing in macOS to explain it.")
+        forceHint.font = .systemFont(ofSize: 11)
+        forceHint.textColor = .secondaryLabelColor
+        forceHint.alignment = .center
+        forceHint.preferredMaxLayoutWidth = 320
+
+        let stack = NSStackView(views: [title, promptLabel, hint, resetButton,
+                                        rule(), holdCheckbox, holdHint,
+                                        rule(), forceButton, forceHint])
         stack.orientation = .vertical
         stack.spacing = 10
+        stack.setCustomSpacing(20, after: resetButton)
+        stack.setCustomSpacing(16, after: stack.views[4])
+        stack.setCustomSpacing(6, after: holdCheckbox)
+        stack.setCustomSpacing(20, after: holdHint)
+        stack.setCustomSpacing(16, after: stack.views[7])
+        stack.setCustomSpacing(6, after: forceButton)
         stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 16, right: 20)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
@@ -70,6 +124,8 @@ final class ShortcutRecorder {
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             stack.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            stack.views[4].widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
+            stack.views[7].widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
         ])
         panel.contentView = content
         window = panel
@@ -152,6 +208,29 @@ final class ShortcutRecorder {
         }
     }
 
+    private func rule() -> NSBox {
+        let box = NSBox()
+        box.boxType = .separator
+        return box
+    }
+
+    @objc private func toggleHoldToTalk(_ sender: NSButton) {
+        actions?.setHoldToTalk(sender.state == .on)
+    }
+
+    /// Says so afterwards. The whole point of the button is a microphone that is silent
+    /// for no visible reason, and a click that changes nothing on screen is
+    /// indistinguishable from a click that did not work.
+    @objc private func forceUnmuteEverything() {
+        actions?.forceUnmute()
+        forceButton.title = "Every Device Unmuted"
+        forceButton.isEnabled = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.forceButton.title = "Force Unmute All Devices"
+            self?.forceButton.isEnabled = true
+        }
+    }
+
     @objc private func resetToDefault() {
         let standard = Shortcut.standard
         promptLabel.textColor = .systemGreen
@@ -168,6 +247,7 @@ final class ShortcutRecorder {
         flagsMonitor = nil
         window?.orderOut(nil)
         window = nil
+        actions = nil
         let callback = completion
         completion = nil
         ShortcutRecorder.shared = nil

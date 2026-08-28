@@ -4,10 +4,8 @@ enum Settings {
     private static let shortcutKey = "shortcut"
     private static let soundKey = "soundEnabled"
     private static let askedKey = "askedForAccessibility"
-    private static let iconStyleKey = "iconStyle"
     private static let soundPackKey = "soundPack"
     private static let holdKey = "holdToTalk"
-    private static let followTeamsKey = "followTeamsOnCallStart"
 
     static var shortcut: Shortcut {
         get {
@@ -30,15 +28,6 @@ enum Settings {
         set { UserDefaults.standard.set(newValue, forKey: soundKey) }
     }
 
-    static var iconStyle: StatusIcon.Style {
-        get {
-            guard let raw = UserDefaults.standard.string(forKey: iconStyleKey),
-                  let value = StatusIcon.Style(rawValue: raw) else { return .glyph }
-            return value
-        }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: iconStyleKey) }
-    }
-
     static var soundPack: Feedback.Pack {
         get {
             guard let raw = UserDefaults.standard.string(forKey: soundPackKey),
@@ -53,15 +42,6 @@ enum Settings {
     static var holdToTalk: Bool {
         get { UserDefaults.standard.bool(forKey: holdKey) }
         set { UserDefaults.standard.set(newValue, forKey: holdKey) }
-    }
-
-    /// On by default: a call that starts with Teams and the microphone disagreeing is
-    /// the state this exists to end, and the disagreement is invisible until somebody
-    /// says they cannot hear you. Off for anyone who would rather a call never change
-    /// the microphone on its own.
-    static var followTeamsOnCallStart: Bool {
-        get { UserDefaults.standard.object(forKey: followTeamsKey) as? Bool ?? true }
-        set { UserDefaults.standard.set(newValue, forKey: followTeamsKey) }
     }
 
     /// So the permission is asked for once, at the moment it would first have made a

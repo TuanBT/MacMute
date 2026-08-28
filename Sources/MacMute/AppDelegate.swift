@@ -18,6 +18,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hold = HoldGesture()
     private var holdTimer: Timer?
 
+    /// Where the microphone was before a call borrowed it, and nil whenever the state
+    /// it is in now is one the user chose for themselves.
+    private var borrowedFrom: Bool?
+    private var releaseToken = 0
+
     // MARK: - Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -34,7 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Teams is only ever asked on the one edge that can have changed its answer.
         audio.onInputActivityChange = { [weak self] in
             guard let self else { return }
-            if self.audio.isInputActive { self.feedback.warmUp() }
+            if self.audio.isInputActive { self.feedback.warmUp() } else { self.scheduleRelease() }
             self.render()
         }
         audio.onCaptureStarted = { [weak self] in self?.followTeams() }
@@ -117,6 +122,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func toggleMute() {
         let t0 = DispatchTime.now().uptimeNanoseconds
+        // Whatever the microphone was lent for the duration of a call, this is the user
+        // taking it back: from here on the state is theirs and outlives the call.
+        borrowedFrom = nil
         // The menu names an absolute state, so a press still in flight has nothing left
         // to say about it.
         hold.cancel()
@@ -125,7 +133,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func settle(_ outcome: HoldGesture.Outcome) {
-        guard case .revert(let previous) = outcome else { return }
+        guard case .revert(let previous) = outcome else {
+            // A tap that stands is the user choosing this state. A hold that reverts
+            // puts back the state that was already there, borrowed or not, so it says
+            // nothing about who owns it.
+            borrowedFrom = nil
+            return
+        }
         apply(previous, since: DispatchTime.now().uptimeNanoseconds)
     }
 
@@ -176,12 +190,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// and a call starting is the one moment where nothing the user did with the
     /// shortcut is being overruled — any press cancels a read still in flight.
     private func followTeams() {
-        guard Settings.followTeamsOnCallStart else { return }
+        releaseToken += 1   // a call starting settles nothing that was owed to the last one
         teamsAX.readMuted { [weak self] teamsMuted in
             guard let self, teamsMuted != self.audio.isMuted else { return }
             Timing.note("call started with Teams \(teamsMuted ? "muted" : "live"), following it")
+            // What the microphone was doing before the call is kept, because this state
+            // is on loan from Teams and has to be given back when the call ends.
+            if self.borrowedFrom == nil { self.borrowedFrom = self.audio.isMuted }
             // Teams is already where it says it is, so it is not told anything back.
             self.audio.setMuted(teamsMuted)
+            self.render()
+        }
+    }
+
+    /// Gives back the state the call borrowed, once the call is over.
+    ///
+    /// Teams' own mute ends with the call; a HAL mute does not. Adopting one at the
+    /// start of a call and then keeping it leaves the microphone dead for every other
+    /// app afterwards, with nothing left in Teams to explain the red icon — a mute
+    /// nobody chose and only this app knows how to undo.
+    ///
+    /// Only ever a state the user did not choose: a press of the shortcut, in either
+    /// direction, hands ownership to them and there is nothing left here to give back.
+    private func scheduleRelease() {
+        guard borrowedFrom != nil else { return }
+        releaseToken += 1
+        let token = releaseToken
+        // Capture stopping is not proof a meeting ended. Teams stops one device and
+        // starts another when it switches, and for a moment in between nothing is
+        // capturing at all; releasing on that would open the microphone mid-call.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, token == self.releaseToken else { return }
+            guard !self.audio.isInputActive, let previous = self.borrowedFrom else { return }
+            self.borrowedFrom = nil
+            guard previous != self.audio.isMuted else { return }
+            Timing.note("call over, giving the microphone back to \(previous ? "muted" : "live")")
+            self.audio.setMuted(previous)
             self.render()
         }
     }
@@ -255,22 +299,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Presentation
 
     private var iconState: StatusIcon.State {
-        if audio.isMuted { return .muted }
-        return audio.isInputActive ? .live : .idle
+        guard audio.isInputActive else { return audio.isMuted ? .mutedIdle : .idle }
+        return audio.isMuted ? .muted : .live
     }
 
     private func render() {
         guard let button = statusItem.button else { return }
         let status = statusText
-        button.image = StatusIcon.image(for: iconState, style: Settings.iconStyle,
-                                        description: status)
+        button.image = StatusIcon.image(for: iconState, description: status)
         button.toolTip = "MacMute — \(status)"
     }
 
+    /// The icon drops the colour once nothing is listening; the words do not drop the
+    /// mute, so the menu and the tooltip still say it in as many letters.
     private var statusText: String {
-        let mic = audio.isMuted ? "Muted"
-            : (audio.isInputActive ? "Mic live" : "Mic idle")
-        return mic
+        guard audio.isInputActive else { return audio.isMuted ? "Muted, nothing listening" : "Mic idle" }
+        return audio.isMuted ? "Muted" : "Mic live"
     }
 
     private var teamsStatusText: String {
@@ -297,38 +341,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         toggle.keyEquivalentModifierMask = shortcut.menuModifierMask
         menu.addItem(toggle)
 
-        let change = NSMenuItem(title: "Change Shortcut…",
-                                action: #selector(changeShortcut), keyEquivalent: "")
-        change.target = self
-        menu.addItem(change)
-
-        let holdItem = NSMenuItem(title: "Hold to Talk",
-                                  action: #selector(toggleHoldToTalk), keyEquivalent: "")
-        holdItem.target = self
-        holdItem.state = Settings.holdToTalk ? .on : .off
-        holdItem.toolTip = """
-            Tap the shortcut to toggle, as usual. Hold it and the microphone only \
-            changes for as long as the key is down: push-to-talk while muted, \
-            push-to-mute while live.
-            """
-        menu.addItem(holdItem)
-
-        let follow = NSMenuItem(title: "Follow Teams on Call Start",
-                                action: #selector(toggleFollowTeams), keyEquivalent: "")
-        follow.target = self
-        follow.state = Settings.followTeamsOnCallStart ? .on : .off
-        follow.toolTip = """
-            When a Teams call starts, match the microphone to what the Teams Mute \
-            button already shows, so the first press of the shortcut moves both \
-            instead of putting them right. Requires Accessibility.
-            """
-        menu.addItem(follow)
-
-        let force = NSMenuItem(title: "Force Unmute All Devices",
-                               action: #selector(forceUnmute), keyEquivalent: "")
-        force.target = self
-        force.toolTip = "Clears the mute on every input device, whatever put it there. For a microphone that is silent with nothing in macOS to explain it."
-        menu.addItem(force)
         menu.addItem(.separator())
 
         let sound = NSMenuItem(title: "Sound", action: nil, keyEquivalent: "")
@@ -351,20 +363,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         soundMenu.delegate = self
         menu.addItem(sound)
 
-        let style = NSMenuItem(title: "Menu Bar Style", action: nil, keyEquivalent: "")
-        let styleMenu = NSMenu()
-        for option in StatusIcon.Style.allCases {
-            let item = NSMenuItem(title: option.title, action: #selector(changeIconStyle(_:)),
-                                  keyEquivalent: "")
-            item.target = self
-            item.representedObject = option.rawValue
-            item.state = Settings.iconStyle == option ? .on : .off
-            item.image = StatusIcon.image(for: .muted, style: option, description: option.title)
-            styleMenu.addItem(item)
-        }
-        style.submenu = styleMenu
-        menu.addItem(style)
-
         let launch = NSMenuItem(title: "Launch at Login",
                                 action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
         launch.target = self
@@ -382,6 +380,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
+        let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings),
+                                  keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
+
         let about = NSMenuItem(title: "About MacMute",
                                action: #selector(showAbout), keyEquivalent: "")
         about.target = self
@@ -393,9 +396,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Menu actions
 
-    /// The escape hatch. Unlike Unmute this does not consult a baseline, because the
-    /// case it exists for is the one where the baseline is the thing that is wrong.
-    @objc private func forceUnmute() {
+    /// The escape hatch, called from the settings panel. Unlike Unmute this does not
+    /// consult a baseline, because the case it exists for is the one where the baseline
+    /// is the thing that is wrong.
+    private func forceUnmute() {
+        borrowedFrom = nil
         hold.cancel()
         stopHoldWatchdog()
         audio.forceUnmuteEverything()
@@ -403,20 +408,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         render()
     }
 
-    @objc private func toggleFollowTeams() {
-        Settings.followTeamsOnCallStart.toggle()
-    }
-
-    @objc private func toggleHoldToTalk() {
-        Settings.holdToTalk.toggle()
+    private func setHoldToTalk(_ enabled: Bool) {
+        Settings.holdToTalk = enabled
         // Switching it off mid-press leaves a hold nothing will ever end.
-        if !Settings.holdToTalk { endHold() }
+        if !enabled { endHold() }
     }
 
-    @objc private func changeShortcut() {
+    @objc private func openSettings() {
         // Rebinding unregisters the key that is being held, so its release is gone.
         endHold()
-        ShortcutRecorder.present(current: shortcut) { [weak self] new in
+        let actions = ShortcutRecorder.Actions(
+            setHoldToTalk: { [weak self] enabled in self?.setHoldToTalk(enabled) },
+            forceUnmute: { [weak self] in self?.forceUnmute() })
+        ShortcutRecorder.present(current: shortcut, holdToTalk: Settings.holdToTalk,
+                                 actions: actions) { [weak self] new in
             guard let self, let new else { return }
             guard HotKeyManager.shared.register(new) else {
                 HotKeyManager.shared.register(self.shortcut)
@@ -443,13 +448,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Settings.soundEnabled = true
         Settings.soundPack = pack
         feedback.play(.unmute, pack: pack)
-    }
-
-    @objc private func changeIconStyle(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String,
-              let style = StatusIcon.Style(rawValue: raw) else { return }
-        Settings.iconStyle = style
-        render()
     }
 
     @objc private func showAbout() {

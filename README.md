@@ -57,12 +57,17 @@ Accessibility API is the remaining way to keep that indicator in sync.
 - **Follows Teams when a call starts** — a call joins with its own mute state, decided by
   Teams and knowing nothing about the mute left over from the last one. MacMute reads the
   Teams button once, at that moment, and matches the microphone to it, so the first press
-  of the shortcut moves both instead of spending itself putting them back in step. On by
-  default; switch it off in the menu
+  of the shortcut moves both instead of spending itself putting them back in step. When
+  the call ends it gives that state back, because a mute borrowed from Teams should not
+  outlive the meeting — a mute you made yourself still does. Nothing to switch on: it
+  needs no setting and does nothing at all without Teams or without Accessibility
 - **Works with all apps** — Zoom, Meet, Slack, Discord, FaceTime, and more
 - **Audio feedback** — four sound styles (Click, Soft, Marimba, Chime) or off; falling tone
   for mute, rising for unmute. Hover over each option to preview the sound live
-- **Menu bar icon** — two styles to choose from (Coloured Icon or Filled Badge); colour shows mic status at a glance
+- **Menu bar icon** — four states in one glyph at one size: green while a microphone is
+  open, red while something is listening to a muted one, and monochrome once nothing is
+  listening — still slashed if the mute is on, so a mute left over from a meeting is
+  stated rather than shouted
 - **Safe** — restores all microphones on quit, on crash signals, and on next launch
 - **Lightweight** — 0% CPU when idle, nothing polled while you are not pressing anything,
   about 4 ms from keypress to silence
@@ -100,16 +105,22 @@ The icon shows the real state of your microphone:
 | Green mic | An app has your microphone open |
 | Red crossed mic | Muted |
 
-Click the icon for settings:
+Click the icon. The menu holds the mute itself and the two things worth changing between
+calls; everything set once and then left alone lives in **Settings…**
 
-| Option | Description |
+| Menu | Description |
 |---|---|
-| **Change Shortcut…** | Set any key combination (live modifier preview, reset to default) |
-| **Hold to Talk** | Tap to toggle; hold the shortcut to change the mic only while the key is down |
+| **Mute / Unmute** | The same toggle as the shortcut, for when the menu is already open |
 | **Sound** | Click, Soft, Marimba, Chime, or Off — hover to preview |
-| **Menu Bar Style** | Coloured Icon or Filled Badge |
 | **Launch at Login** | Start with macOS |
+| **Settings…** | The panel below |
 | **About MacMute** | Version info and GitHub link |
+
+| Settings… | Description |
+|---|---|
+| **Shortcut** | Any key combination, with a live modifier preview and a reset to default |
+| **Hold to Talk** | Tap to toggle; hold the shortcut to change the mic only while the key is down |
+| **Force Unmute All Devices** | Clears the mute on every input device, whatever put it there — the escape hatch for a microphone that is silent with nothing in macOS to explain it |
 
 ## FAQ
 
