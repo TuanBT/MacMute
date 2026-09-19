@@ -43,6 +43,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.render()
         }
         audio.onCaptureStarted = { [weak self] in self?.followTeams() }
+        // The only moment the icon cannot be trusted, so it is the moment to be loud.
+        audio.onMuteLost = { [weak self] in self?.warnMuteLost() }
         installSignalHandlers()
         observeSessionInterruptions()
         render()
@@ -56,6 +58,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A HAL mute outlives this process, so leaving one behind would kill the
         // microphone system wide with nothing in the macOS UI to explain it.
         audio.restoreOnExit()
+        Log.write("quit")
+        Log.flush()
     }
 
     /// `applicationWillTerminate` never runs for SIGTERM or SIGINT, which is how a
@@ -65,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             signal(value, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: value, queue: .main)
             source.setEventHandler { [weak self] in
+                Log.write("signal \(value)")
                 self?.audio.restoreOnExit()
                 NSApp.terminate(nil)
             }
@@ -162,9 +167,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !target { feedback.play(.unmute) }
         let t2 = DispatchTime.now().uptimeNanoseconds
 
+        Log.write("apply -> \(target ? "MUTE" : "UNMUTE")")
         let applied = audio.setMuted(target)
         teamsAX.setMuted(target)
         let t3 = DispatchTime.now().uptimeNanoseconds
+        if !applied { Log.write("⚠︎ no device accepted the \(target ? "mute" : "unmute")") }
 
         if target { feedback.play(applied ? .mute : .error) }
         if !applied && !target { feedback.play(.error) }
@@ -173,6 +180,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         render()
         let t5 = DispatchTime.now().uptimeNanoseconds
         Timing.log(target: target, marks: [t0, t1, t2, t3, t4, t5])
+        // Late enough for the deferred devices and Teams' own reaction to have landed.
+        audio.logSnapshot("after \(target ? "mute" : "unmute")", after: 0.5)
+    }
+
+    /// A device came back live and could not be closed. Worse than never muting: the
+    /// icon says you cannot be heard. The error tone says otherwise, and the alert says
+    /// what to do about it, since only the user can pull the headset or leave the call.
+    private func warnMuteLost() {
+        feedback.play(.error)
+        render()
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Microphone may be live"
+        alert.informativeText = """
+            An input device lost its mute and MacMute could not close it again. \
+            Mute in Teams directly, or disconnect the device, until this is resolved.
+            """
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     // MARK: - Following Teams
@@ -200,6 +226,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Teams is already where it says it is, so it is not told anything back.
             self.audio.setMuted(teamsMuted)
             self.render()
+            self.audio.logSnapshot("after following Teams", after: 0.5)
         }
     }
 
@@ -227,6 +254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Timing.note("call over, giving the microphone back to \(previous ? "muted" : "live")")
             self.audio.setMuted(previous)
             self.render()
+            self.audio.logSnapshot("after call ended", after: 0.5)
         }
     }
 
@@ -288,8 +316,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                      NSWorkspace.screensDidSleepNotification,
                      NSWorkspace.sessionDidResignActiveNotification] {
             workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Log.write("session: \(name.rawValue)")
                 self?.endHold()
             }
+        }
+        workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil,
+                              queue: .main) { [weak self] _ in
+            // Devices come back from sleep renegotiated, and not always wearing the mute
+            // they went to sleep with.
+            Log.write("session: woke")
+            self?.audio.logSnapshot("wake", after: 2)
         }
         DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main
@@ -419,7 +455,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         endHold()
         let actions = ShortcutRecorder.Actions(
             setHoldToTalk: { [weak self] enabled in self?.setHoldToTalk(enabled) },
-            forceUnmute: { [weak self] in self?.forceUnmute() })
+            forceUnmute: { [weak self] in self?.forceUnmute() },
+            showLog: { [weak self] in self?.showLog() })
         ShortcutRecorder.present(current: shortcut, holdToTalk: Settings.holdToTalk,
                                  actions: actions) { [weak self] new in
             guard let self, let new else { return }
@@ -433,6 +470,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             self.shortcut = new
             Settings.shortcut = new
+        }
+    }
+
+    /// Takes a fresh reading first, so the file shows the state as it is now and not
+    /// only as it was at the last keypress.
+    private func showLog() {
+        audio.logSnapshot("log opened")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            Log.flush()
+            NSWorkspace.shared.activateFileViewerSelecting([Log.file])
         }
     }
 

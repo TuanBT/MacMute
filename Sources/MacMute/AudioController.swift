@@ -33,10 +33,16 @@ final class AudioController: AudioBackend {
     /// joins a microphone that was already open.
     var onCaptureStarted: (() -> Void)?
 
+    /// Fires when a device lost the mute we put on it and neither the mute property nor
+    /// the volume could close it again. The app is then wrong about the microphone, and
+    /// the user has to be told rather than left believing the icon.
+    var onMuteLost: (() -> Void)?
+
     /// What each device can do, resolved once per device-list change. Probing this on
     /// every keypress cost tens of milliseconds against about 1.5 ms for the writes.
     private struct CachedDevice {
         var info: AudioDeviceInfo
+        var name: String
         var volumeTargets: [VolumeTarget]
     }
 
@@ -58,13 +64,16 @@ final class AudioController: AudioBackend {
     private var activityListeners: [AudioDeviceID: AudioObjectPropertyListenerBlock] = [:]
     private var volumeGuards: [AudioDeviceID: (block: AudioObjectPropertyListenerBlock,
                                                address: AudioObjectPropertyAddress)] = [:]
+    private var muteListeners: [AudioDeviceID: AudioObjectPropertyListenerBlock] = [:]
 
     init() {
         refreshCache()
         refreshInputActivity()
+        engine.onLog = { Log.write($0) }
         engine.onBaselineChange = { [weak self] baseline in self?.persist(baseline) }
         engine.seedDeafDevices(Set(UserDefaults.standard.stringArray(forKey: Self.deafKey) ?? []))
         engine.onDeafDevicesChange = { uids in
+            Log.write("devices ignoring writes: \(uids.sorted())")
             // Per-process aggregates carry the client's pid in their UID, so they never
             // recur and remembering one helps nobody. Left in, the list grew by a few
             // entries every session and was never read usefully again.
@@ -74,6 +83,7 @@ final class AudioController: AudioBackend {
         recoverFromCrashIfNeeded()
         observeDeviceList()
         refreshActivityListeners()
+        logSnapshot("launch")
     }
 
     // MARK: - Public surface
@@ -96,13 +106,29 @@ final class AudioController: AudioBackend {
         let previous = capturingDevices
         capturingDevices = Set(order.filter { isRunning($0) })
         isInputActive = !capturingDevices.isEmpty
-        if !capturingDevices.subtracting(previous).isEmpty { onCaptureStarted?() }
+        let started = capturingDevices.subtracting(previous)
+        let stopped = previous.subtracting(capturingDevices)
+        if !started.isEmpty || !stopped.isEmpty {
+            Log.write("capture: started \(names(started)) stopped \(names(stopped)) "
+                      + "now \(names(capturingDevices)), app muted=\(engine.isMuted)")
+        }
+        if !started.isEmpty {
+            // What each device actually holds at the moment a call opens it is the one
+            // reading that can tell a mute that never landed from one undone later.
+            logSnapshot("capture started")
+            onCaptureStarted?()
+        }
+    }
+
+    private func names(_ ids: Set<UInt32>) -> [String] {
+        order.filter(ids.contains).map { cache[$0]?.name ?? "#\($0)" }
     }
 
     /// Called on quit and from the signal handlers. A HAL mute outlives the process
     /// that set it, so skipping this leaves the microphone dead with nothing in the
     /// macOS UI to explain it.
     func restoreOnExit() {
+        Log.write("exit: muted=\(engine.isMuted) baseline=\(engine.baseline.keys.sorted())")
         // `isMuted` is not the question. A device can be wearing a mute of ours while
         // the app believes the microphone is live, and that is precisely the state that
         // must not be allowed to outlive the process. A baseline still holding entries
@@ -115,6 +141,7 @@ final class AudioController: AudioBackend {
     /// devices that only ever ignored us. The escape hatch for a microphone that is
     /// silent with nothing in the macOS UI to explain it.
     func forceUnmuteEverything() {
+        Log.write("force unmute everything")
         engine.setMuted(false)
         for id in order {
             stopVolumeGuard(id)
@@ -127,8 +154,12 @@ final class AudioController: AudioBackend {
 
     func inputDevices() -> [AudioDeviceInfo] { order.compactMap { cache[$0]?.info } }
 
-    func mute(of id: UInt32) -> Bool? {
-        var address = muteAddress()
+    func mute(of id: UInt32) -> Bool? { Self.readMute(id) }
+
+    private static func readMute(_ id: UInt32) -> Bool? {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyMute,
+                                                 mScope: kAudioDevicePropertyScopeInput,
+                                                 mElement: kAudioObjectPropertyElementMain)
         guard AudioObjectHasProperty(id, &address) else { return nil }
         var value: UInt32 = 0
         var size = UInt32(MemoryLayout<UInt32>.size)
@@ -145,9 +176,13 @@ final class AudioController: AudioBackend {
                                           UInt32(MemoryLayout<UInt32>.size), &value) == noErr
     }
 
-    func volume(of id: UInt32) -> Float? {
-        for target in cache[id]?.volumeTargets ?? [] {
-            var address = volumeAddress(target)
+    func volume(of id: UInt32) -> Float? { Self.readVolume(id, cache[id]?.volumeTargets ?? []) }
+
+    private static func readVolume(_ id: UInt32, _ targets: [VolumeTarget]) -> Float? {
+        for target in targets {
+            var address = AudioObjectPropertyAddress(mSelector: target.selector,
+                                                     mScope: kAudioDevicePropertyScopeInput,
+                                                     mElement: target.element)
             var value: Float32 = 0
             var size = UInt32(MemoryLayout<Float32>.size)
             if AudioObjectGetPropertyData(id, &address, 0, nil, &size, &value) == noErr {
@@ -189,10 +224,14 @@ final class AudioController: AudioBackend {
                 return
             }
             strikes += 1
+            let name = self.cache[id]?.name ?? "#\(id)"
             guard strikes <= 5 else {
+                // The one way this guard can leave a microphone open behind a red icon.
+                Log.write("⚠︎ volume guard: \(name) keeps rising (\(value)), GIVING UP — device is live")
                 self.stopVolumeGuard(id)
                 return
             }
+            Log.write("volume guard: \(name) raised to \(value) while muted, back to 0 (strike \(strikes))")
             _ = self.setVolume(id, 0)
         }
         if AudioObjectAddPropertyListenerBlock(id, &address, DispatchQueue.main, block) == noErr {
@@ -278,6 +317,7 @@ final class AudioController: AudioBackend {
                 info: AudioDeviceInfo(id: device, uid: uid,
                                       muteSettable: isMuteSettable(device),
                                       hasWritableVolume: !targets.isEmpty),
+                name: name(of: device) ?? uid,
                 volumeTargets: targets)
             nextOrder.append(device)
         }
@@ -327,6 +367,18 @@ final class AudioController: AudioBackend {
     private func uid(of device: AudioDeviceID) -> String? {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var value: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<CFTypeRef?>.size)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr,
+              let value else { return nil }
+        return value.takeRetainedValue() as String
+    }
+
+    private func name(of device: AudioDeviceID) -> String? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioObjectPropertyName,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         var value: Unmanaged<CFString>?
@@ -386,6 +438,7 @@ final class AudioController: AudioBackend {
         ) { [weak self] _, _ in
             guard let self else { return }
             self.refreshCache()
+            Log.write("device list changed: \(self.order.compactMap { self.cache[$0]?.name })")
             // A device plugged in while muted must be muted too, or it hands back a
             // live microphone the user believes is off.
             self.engine.adoptNewDevices()
@@ -412,6 +465,80 @@ final class AudioController: AudioBackend {
             if AudioObjectAddPropertyListenerBlock(device, &address, DispatchQueue.main, block) == noErr {
                 activityListeners[device] = block
             }
+        }
+        refreshMuteListeners(devices)
+    }
+
+    /// Watches the mute property of every input device, and puts back a mute of ours
+    /// that something else took off.
+    ///
+    /// Nothing else here would notice a device losing its mute to someone else — a
+    /// driver resetting on a format change, a headset switching profile, another app —
+    /// and that is exactly the case where the icon stays red while the microphone is
+    /// open. The decision lives in `MuteEngine.reassertMute`; this only relays.
+    private func refreshMuteListeners(_ devices: Set<UInt32>) {
+        for (device, block) in muteListeners where !devices.contains(device) {
+            var address = muteAddress()
+            AudioObjectRemovePropertyListenerBlock(device, &address, DispatchQueue.main, block)
+            muteListeners.removeValue(forKey: device)
+        }
+        for device in devices where muteListeners[device] == nil {
+            var address = muteAddress()
+            guard AudioObjectHasProperty(device, &address) else { continue }
+            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+                guard let self else { return }
+                let name = self.cache[device]?.name ?? "#\(device)"
+                Log.write("mute property: \(name) -> \(self.mute(of: device).map { String($0) } ?? "nil") "
+                          + "(app muted=\(self.engine.isMuted))")
+                switch self.engine.reassertMute(device, now: ProcessInfo.processInfo.systemUptime) {
+                case .notNeeded: break
+                case .remuted, .fellBackToVolume:
+                    self.logSnapshot("after putting back the mute on \(name)", after: 0.3)
+                case .failed:
+                    self.logSnapshot("mute lost on \(name)")
+                    self.onMuteLost?()
+                }
+            }
+            if AudioObjectAddPropertyListenerBlock(device, &address, DispatchQueue.main, block) == noErr {
+                muteListeners[device] = block
+            }
+        }
+    }
+
+    // MARK: - Diagnostics
+
+    /// Writes what every input device actually holds right now, read from the HAL rather
+    /// than from anything the app remembers. The line to look for is a capturing device
+    /// marked LIVE while the app says muted: that is being heard.
+    ///
+    /// The list is taken here on the main thread, where the cache lives, and the reads
+    /// happen elsewhere so a slow Bluetooth device never lands on the keypress.
+    func logSnapshot(_ reason: String, after delay: TimeInterval = 0) {
+        let devices = order.compactMap { cache[$0] }
+        let capturing = capturingDevices
+        let muted = engine.isMuted
+        let baseline = engine.baseline
+        let deaf = engine.deafDevices
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) {
+            var out = "snapshot (\(reason)): app muted=\(muted), capturing=\(!capturing.isEmpty)"
+            for device in devices {
+                let id = device.info.id
+                let mute = Self.readMute(id)
+                let volume = Self.readVolume(id, device.volumeTargets)
+                let silent = mute == true || (volume.map { $0 <= 0.0001 } ?? false)
+                var flags: [String] = []
+                if capturing.contains(id) { flags.append("CAPTURING") }
+                if muted && capturing.contains(id) && !silent { flags.append("⚠︎ LIVE WHILE MUTED") }
+                if deaf.contains(device.info.uid) { flags.append("ignores-writes") }
+                if baseline[device.info.uid] != nil { flags.append("has-baseline") }
+                out += "\n    [\(id)] \(device.name) uid=\(device.info.uid)"
+                    + " mute=\(mute.map { String($0) } ?? "n/a")"
+                    + " volume=\(volume.map { String(format: "%.3f", $0) } ?? "n/a")"
+                    + " muteSettable=\(device.info.muteSettable)"
+                    + " volumeWritable=\(device.info.hasWritableVolume)"
+                    + (flags.isEmpty ? "" : " " + flags.joined(separator: " "))
+            }
+            Log.write(out)
         }
     }
 

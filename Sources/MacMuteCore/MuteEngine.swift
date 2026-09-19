@@ -66,6 +66,10 @@ public final class MuteEngine {
     private let backend: AudioBackend
     public var onBaselineChange: (([String: Baseline]) -> Void)?
 
+    /// One line per decision and per device outcome. Called from whichever thread did
+    /// the work, so the receiver must not assume the main one.
+    public var onLog: ((String) -> Void)?
+
     /// `deafDevices` is the only state the deferred pass touches, and that pass runs
     /// off the main thread.
     private let lock = NSLock()
@@ -74,6 +78,15 @@ public final class MuteEngine {
     /// pressing the shortcut repeatedly would otherwise queue a batch of slow writes
     /// per press, and a Bluetooth device costs milliseconds each.
     private var generation = 0
+
+    /// When each device last had a mute of ours put back, within the current mute.
+    /// Main thread only, like the listener that feeds it.
+    private var corrections: [String: [TimeInterval]] = [:]
+
+    /// More than this many put-backs inside `correctionWindow` means the device is
+    /// fighting us, and the mute property is abandoned for the volume.
+    public static let maxCorrections = 5
+    public static let correctionWindow: TimeInterval = 10
 
     public init(backend: AudioBackend) {
         self.backend = backend
@@ -87,6 +100,9 @@ public final class MuteEngine {
         generation += 1
         let epoch = generation
         lock.unlock()
+        // Each mute starts with a clean slate: a device that fought the last one may
+        // well behave this time.
+        corrections = [:]
 
         let devices = backend.inputDevices()
 
@@ -127,6 +143,9 @@ public final class MuteEngine {
             anyApplied = true
             if !muted { restored.append(device.uid) }
         }
+
+        onLog?("engine: \(muted ? "mute" : "unmute") urgent=\(urgent.map(\.uid)) "
+               + "deferred=\(rest.map(\.uid)) applied=\(anyApplied)")
 
         let deferred = rest
         backend.deferWork { [weak self] in
@@ -179,6 +198,7 @@ public final class MuteEngine {
 
         backend.stopVolumeGuard(device.id)
         guard let saved = baseline[device.uid] else {
+            onLog?("engine:   \(device.uid): no baseline, clearing")
             // Appeared after we muted, so it was never the user's own mute.
             return apply(muted: false, to: device)
         }
@@ -193,6 +213,8 @@ public final class MuteEngine {
             // Teams and the menu bar all agree is live.
             if backend.setVolume(device.id, 1.0) { applied = true }
         }
+        onLog?("engine:   \(device.uid): restore to muted=\(saved.muted) "
+               + "volume=\(saved.volume.map { String($0) } ?? "nil") -> \(applied ? "ok" : "FAILED")")
         return applied
     }
 
@@ -233,6 +255,60 @@ public final class MuteEngine {
             adopted = true
         }
         if adopted { publishBaseline() }
+    }
+
+    public enum Reassertion: Equatable {
+        /// Nothing to do: the app is live, the device still reads muted, or the mute
+        /// on it was never ours.
+        case notNeeded
+        /// The mute property was written back and reads muted again.
+        case remuted
+        /// The mute property would not stay put, so the device is held at zero volume
+        /// under the volume guard instead.
+        case fellBackToVolume
+        /// Neither held. The device is live and nothing here can close it.
+        case failed
+    }
+
+    /// Called whenever a device's mute property changes. Puts back a mute of ours that
+    /// something else took off while the app still says muted.
+    ///
+    /// Without this the red icon is a claim about the past: a Bluetooth headset
+    /// switching profile, a driver resetting on a format change, or another app writing
+    /// the property all open the microphone with nothing in the app noticing. That is
+    /// the one failure worse than no mute at all — you speak because you believe you
+    /// cannot be heard.
+    ///
+    /// Our own writes fire the same notification, which is why the test is "reads live
+    /// while muted" and never "something changed". The window is the backstop against a
+    /// device that keeps flipping back: past it, the volume takes over.
+    @discardableResult
+    public func reassertMute(_ id: UInt32, now: TimeInterval) -> Reassertion {
+        guard isMuted, backend.mute(of: id) == false,
+              let device = backend.inputDevices().first(where: { $0.id == id }),
+              currentBaseline()[device.uid] != nil else { return .notNeeded }
+
+        var recent = (corrections[device.uid] ?? []).filter { now - $0 < Self.correctionWindow }
+        recent.append(now)
+        corrections[device.uid] = recent
+
+        if recent.count <= Self.maxCorrections, device.muteSettable,
+           backend.setMute(id, true), backend.mute(of: id) == true {
+            onLog?("guard: \(device.uid) was unmuted by something else, muted again "
+                   + "(\(recent.count) in \(Int(Self.correctionWindow))s)")
+            return .remuted
+        }
+
+        // The volume is the second lock, and the volume guard already knows how to hold
+        // it against Teams raising the gain.
+        if device.hasWritableVolume, backend.setVolume(id, 0),
+           let level = backend.volume(of: id), level <= 0.0001 {
+            backend.startVolumeGuard(id)
+            onLog?("guard: \(device.uid) will not stay muted, holding it at volume 0 instead")
+            return .fellBackToVolume
+        }
+        onLog?("guard: ⚠︎ \(device.uid) was unmuted and cannot be closed again — DEVICE IS LIVE")
+        return .failed
     }
 
     /// Puts back a baseline recovered from disk after the process was killed while muted.
@@ -292,34 +368,49 @@ public final class MuteEngine {
         lock.lock()
         let deaf = deafDevices.contains(device.uid)
         lock.unlock()
-        if deaf { return false }
+        let verb = muted ? "mute" : "unmute"
+        if deaf {
+            onLog?("engine:   \(device.uid): \(verb) skipped, known to ignore writes")
+            return false
+        }
 
         // A noErr return proves nothing. The virtual "Microsoft Teams Audio" device
         // reports mute and volume as settable, accepts either write, and discards it.
-        if device.muteSettable, backend.setMute(device.id, muted),
-           backend.mute(of: device.id) == muted {
-            return true
+        if device.muteSettable, backend.setMute(device.id, muted) {
+            let readback = backend.mute(of: device.id)
+            if readback == muted {
+                onLog?("engine:   \(device.uid): \(verb) via mute property, verified")
+                return true
+            }
+            onLog?("engine:   \(device.uid): mute write accepted but reads back "
+                   + "\(readback.map { String($0) } ?? "nil"), trying volume")
         }
 
         guard device.hasWritableVolume, let volume = backend.volume(of: device.id)
         else {
+            onLog?("engine:   \(device.uid): \(verb) FAILED, no usable mute or volume")
             if muted { markDeaf(device.uid) }
             return false
         }
         guard muted else {
             // Writing back the level just read is a no-op that reports success, and when
             // that level is zero the microphone stays dead while the call returns true.
-            return backend.setVolume(device.id, volume <= 0.0001 ? 1.0 : volume)
+            let ok = backend.setVolume(device.id, volume <= 0.0001 ? 1.0 : volume)
+            onLog?("engine:   \(device.uid): unmute via volume -> \(ok ? "ok" : "FAILED")")
+            return ok
         }
 
         _ = backend.setVolume(device.id, 0)
         guard let readback = backend.volume(of: device.id), readback <= 0.0001 else {
+            onLog?("engine:   \(device.uid): mute FAILED, volume stays at "
+                   + "\(backend.volume(of: device.id).map { String($0) } ?? "nil"), marking deaf")
             markDeaf(device.uid)
             return false
         }
         // Only guard a device that demonstrably honours the write, because Teams
         // raises input gain when it joins a meeting and would otherwise reopen the mic.
         backend.startVolumeGuard(device.id)
+        onLog?("engine:   \(device.uid): mute via volume 0, verified, guard on")
         return true
     }
 }

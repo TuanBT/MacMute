@@ -12,6 +12,9 @@ private struct FakeDevice {
     /// Accepts the write, reports success, changes nothing — the virtual
     /// "Microsoft Teams Audio" device behaves exactly like this.
     var ignoresWrites = false
+    /// Takes volume writes but not mute writes — a driver that keeps resetting its
+    /// mute, as some do on a format change.
+    var ignoresMuteWrites = false
 }
 
 private final class FakeBackend: AudioBackend {
@@ -34,7 +37,7 @@ private final class FakeBackend: AudioBackend {
 
     func setMute(_ id: UInt32, _ muted: Bool) -> Bool {
         guard var device = devices[id], device.muteSettable else { return false }
-        if !device.ignoresWrites { device.muted = muted }
+        if !device.ignoresWrites, !device.ignoresMuteWrites { device.muted = muted }
         devices[id] = device
         return true   // noErr, whether or not anything changed
     }
@@ -306,5 +309,93 @@ final class MuteEngineTests: XCTestCase {
         XCTAssertEqual(published.count, 1, "a crash right now must be recoverable")
         engine.setMuted(false)
         XCTAssertTrue(published.isEmpty)
+    }
+
+    // MARK: - A mute taken off by someone else
+
+    func testMuteClearedBySomethingElseIsPutBack() {
+        let (engine, backend) = engine([
+            1: FakeDevice(uid: "built-in", muteSettable: true, hasWritableVolume: true, capturing: true),
+        ])
+        engine.setMuted(true)
+        backend.devices[1]!.muted = false   // a driver reset, another app, a headset profile switch
+
+        XCTAssertEqual(engine.reassertMute(1, now: 0), .remuted)
+        XCTAssertTrue(backend.devices[1]!.muted)
+        XCTAssertEqual(backend.devices[1]!.volume, 1.0, "the level is not touched when the mute holds")
+    }
+
+    func testOurOwnWritesAreNotMistakenForSomeoneElses() {
+        let (engine, backend) = engine([
+            1: FakeDevice(uid: "built-in", muteSettable: true, hasWritableVolume: true, capturing: true),
+        ])
+        engine.setMuted(true)
+        XCTAssertEqual(engine.reassertMute(1, now: 0), .notNeeded, "the mute we just wrote")
+        engine.setMuted(false)
+        XCTAssertEqual(engine.reassertMute(1, now: 1), .notNeeded, "the unmute we just wrote")
+        XCTAssertFalse(backend.devices[1]!.muted)
+    }
+
+    func testUserOwnMuteIsNotEnforcedWhileLive() {
+        let (engine, backend) = engine([
+            1: FakeDevice(uid: "built-in", muteSettable: true, hasWritableVolume: true),
+        ])
+        backend.devices[1]!.muted = false
+        XCTAssertEqual(engine.reassertMute(1, now: 0), .notNeeded)
+        XCTAssertFalse(backend.devices[1]!.muted)
+    }
+
+    func testDeviceThatKeepsFlippingBackIsHeldByTheVolume() {
+        let (engine, backend) = engine([
+            1: FakeDevice(uid: "usb", muteSettable: true, hasWritableVolume: true, capturing: true),
+        ])
+        engine.setMuted(true)
+        for second in 0..<MuteEngine.maxCorrections {
+            backend.devices[1]!.muted = false
+            XCTAssertEqual(engine.reassertMute(1, now: TimeInterval(second)), .remuted)
+        }
+        backend.devices[1]!.muted = false
+        XCTAssertEqual(engine.reassertMute(1, now: 6), .fellBackToVolume)
+        XCTAssertEqual(backend.devices[1]!.volume, 0)
+        XCTAssertTrue(backend.guarded.contains(1))
+
+        engine.setMuted(false)
+        XCTAssertEqual(backend.devices[1]!.volume, 1.0, "the level comes back with the unmute")
+        XCTAssertFalse(backend.guarded.contains(1))
+    }
+
+    func testCorrectionsOutsideTheWindowDoNotCount() {
+        let (engine, backend) = engine([
+            1: FakeDevice(uid: "usb", muteSettable: true, hasWritableVolume: true, capturing: true),
+        ])
+        engine.setMuted(true)
+        for step in 0..<(MuteEngine.maxCorrections * 3) {
+            backend.devices[1]!.muted = false
+            let now = TimeInterval(step) * MuteEngine.correctionWindow
+            XCTAssertEqual(engine.reassertMute(1, now: now), .remuted)
+        }
+    }
+
+    func testMuteThatWillNotHoldFallsBackToVolumeAtOnce() {
+        let (engine, backend) = engine([
+            1: FakeDevice(uid: "usb", muteSettable: true, hasWritableVolume: true, capturing: true),
+        ])
+        engine.setMuted(true)
+        backend.devices[1]!.muted = false
+        backend.devices[1]!.ignoresMuteWrites = true
+
+        XCTAssertEqual(engine.reassertMute(1, now: 0), .fellBackToVolume)
+        XCTAssertEqual(backend.devices[1]!.volume, 0)
+    }
+
+    func testDeviceThatCannotBeClosedIsReportedLive() {
+        let (engine, backend) = engine([
+            1: FakeDevice(uid: "usb", muteSettable: true, hasWritableVolume: false, capturing: true),
+        ])
+        engine.setMuted(true)
+        backend.devices[1]!.muted = false
+        backend.devices[1]!.ignoresMuteWrites = true
+
+        XCTAssertEqual(engine.reassertMute(1, now: 0), .failed)
     }
 }

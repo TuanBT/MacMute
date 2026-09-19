@@ -50,7 +50,10 @@ final class TeamsAccessibility {
 
     /// Best effort, fire and forget. Returns immediately.
     func setMuted(_ muted: Bool) {
-        guard Self.isTrusted else { return }
+        guard Self.isTrusted else {
+            Log.write("teams: no Accessibility permission, button not touched")
+            return
+        }
         queue.async { [weak self] in
             guard let self else { return }
             // A press is the user saying where they want to be. A read still in flight
@@ -95,10 +98,14 @@ final class TeamsAccessibility {
                 // Same reading as the press path: the label names the action, so
                 // "unmute mic" means Teams is muted right now.
                 let muted = label.contains("unmute")
+                Log.write("teams: call start read \"\(label)\" -> Teams is \(muted ? "muted" : "live")")
                 DispatchQueue.main.async { completion(muted) }
                 return
             }
-            guard Date() < deadline else { return }
+            guard Date() < deadline else {
+                Log.write("teams: call start read found no mute button, giving up")
+                return
+            }
             self.attemptRead(epoch, until: deadline, after: 1.5, completion)
         }
     }
@@ -106,16 +113,38 @@ final class TeamsAccessibility {
     // MARK: - Work, entirely off the main thread
 
     private func press(target muted: Bool) {
-        guard let button = resolveButton() else { return }
-        guard let label = label(of: button) else { return }
+        guard let button = resolveButton() else {
+            Log.write("teams: no mute button found (no call, or Teams not running)")
+            return
+        }
+        guard let label = label(of: button) else {
+            Log.write("teams: mute button has no label")
+            return
+        }
 
         // The label names the action the button performs, so "unmute mic" means Teams
         // is currently muted. Only press when Teams disagrees with where we are going.
         let teamsIsMuted = label.contains("unmute")
-        guard teamsIsMuted != muted else { return }
+        guard teamsIsMuted != muted else {
+            Log.write("teams: shows \"\(label)\", already \(muted ? "muted" : "live"), not pressed")
+            return
+        }
 
-        if AXUIElementPerformAction(button, kAXPressAction as CFString) != .success {
+        let result = AXUIElementPerformAction(button, kAXPressAction as CFString)
+        guard result == .success else {
+            Log.write("teams: press on \"\(label)\" FAILED (AXError \(result.rawValue))")
             cachedButton = nil
+            return
+        }
+        Log.write("teams: pressed \"\(label)\"")
+        // The label only flips about 100 ms after the press, so the reading that says
+        // whether Teams actually followed has to wait for it.
+        queue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self else { return }
+            let after = self.label(of: button)
+            let followed = after.map { $0.contains("unmute") == muted } ?? false
+            Log.write("teams: after press shows \"\(after ?? "nil")\""
+                      + (followed ? "" : " ⚠︎ Teams did NOT follow"))
         }
     }
 
@@ -126,6 +155,9 @@ final class TeamsAccessibility {
 
         let found = scan()
         cachedButton = found
+        if let found {
+            Log.write("teams: found mute button \"\(label(of: found) ?? "nil")\" in pid \(appPID)")
+        }
         if found == nil { cooldownUntil = Date().addingTimeInterval(3) }
         return found
     }

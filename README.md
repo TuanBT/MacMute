@@ -203,6 +203,20 @@ key. MacMute also watches the modifier keys themselves, gives up on any hold aft
 seconds, and ends one on sleep, on a locked screen, and on a switched session. A hold that
 goes missing always ends with the microphone back where it started, never left open.
 
+### What if something unmutes my microphone behind MacMute's back?
+
+A driver resetting, a headset switching Bluetooth profile or another app can clear a
+device's mute. MacMute watches for that and mutes the device again at once. If the mute
+keeps coming off, it holds the device at zero volume instead. If neither works, it plays
+the error tone and shows a warning, so the icon never claims a mute that is gone.
+
+### I was heard while muted — how do I report it?
+
+Open **Settings… → Report a Problem**, click **Show Log in Finder**, and attach
+`~/Library/Logs/MacMute/MacMute.log` (plus `MacMute.1.log` if it is there) to a
+[GitHub issue](https://github.com/TuanBT/MacMute/issues/new), with the time it happened.
+The log only holds device names and mute states, never audio.
+
 ## Requirements
 
 - macOS 13 or later

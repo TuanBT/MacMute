@@ -15,6 +15,7 @@ final class ShortcutRecorder {
     struct Actions {
         var setHoldToTalk: (Bool) -> Void
         var forceUnmute: () -> Void
+        var showLog: () -> Void
     }
 
     private static var shared: ShortcutRecorder?
@@ -51,7 +52,7 @@ final class ShortcutRecorder {
         self.actions = actions
         self.currentShortcut = current
 
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 380, height: 380),
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 380, height: 540),
                             styleMask: [.titled, .closable],
                             backing: .buffered,
                             defer: false)
@@ -104,9 +105,46 @@ final class ShortcutRecorder {
         forceHint.alignment = .center
         forceHint.preferredMaxLayoutWidth = 320
 
+        // Written out in full here rather than left to the README, because whoever hits
+        // a live microphone behind a red icon is on their own machine, mid-meeting, and
+        // this panel is the one place in the app they are sure to find.
+        let reportTitle = NSTextField(labelWithString: "Report a Problem")
+        reportTitle.font = .systemFont(ofSize: 13, weight: .semibold)
+        reportTitle.alignment = .center
+
+        let reportHint = NSTextField(wrappingLabelWithString:
+            "If you were heard while muted, or anything else went wrong, open a GitHub "
+            + "issue and attach the log file below, with the time it happened. The log "
+            + "only holds device names and mute states, never audio.")
+        reportHint.font = .systemFont(ofSize: 11)
+        reportHint.textColor = .secondaryLabelColor
+        reportHint.alignment = .center
+        reportHint.preferredMaxLayoutWidth = 320
+
+        let logPath = NSTextField(labelWithString:
+            (Log.file.path as NSString).abbreviatingWithTildeInPath)
+        logPath.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+        logPath.textColor = .secondaryLabelColor
+        logPath.alignment = .center
+        logPath.isSelectable = true
+
+        let logButton = NSButton(title: "Show Log in Finder", target: self,
+                                 action: #selector(showLog))
+        let issueButton = NSButton(title: "Open GitHub Issues", target: self,
+                                   action: #selector(openIssues))
+        for button in [logButton, issueButton] {
+            button.bezelStyle = .recessed
+            button.controlSize = .small
+            button.font = .systemFont(ofSize: 11)
+        }
+        let reportButtons = NSStackView(views: [logButton, issueButton])
+        reportButtons.orientation = .horizontal
+        reportButtons.spacing = 8
+
         let stack = NSStackView(views: [title, promptLabel, hint, resetButton,
                                         rule(), holdCheckbox, holdHint,
-                                        rule(), forceButton, forceHint])
+                                        rule(), forceButton, forceHint,
+                                        rule(), reportTitle, reportHint, logPath, reportButtons])
         stack.orientation = .vertical
         stack.spacing = 10
         stack.setCustomSpacing(20, after: resetButton)
@@ -115,6 +153,10 @@ final class ShortcutRecorder {
         stack.setCustomSpacing(20, after: holdHint)
         stack.setCustomSpacing(16, after: stack.views[7])
         stack.setCustomSpacing(6, after: forceButton)
+        stack.setCustomSpacing(20, after: forceHint)
+        stack.setCustomSpacing(16, after: stack.views[10])
+        stack.setCustomSpacing(6, after: reportTitle)
+        stack.setCustomSpacing(6, after: reportHint)
         stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 16, right: 20)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
@@ -126,6 +168,7 @@ final class ShortcutRecorder {
             stack.centerYAnchor.constraint(equalTo: content.centerYAnchor),
             stack.views[4].widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
             stack.views[7].widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
+            stack.views[10].widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
         ])
         panel.contentView = content
         window = panel
@@ -229,6 +272,14 @@ final class ShortcutRecorder {
             self?.forceButton.title = "Force Unmute All Devices"
             self?.forceButton.isEnabled = true
         }
+    }
+
+    @objc private func showLog() {
+        actions?.showLog()
+    }
+
+    @objc private func openIssues() {
+        NSWorkspace.shared.open(URL(string: "https://github.com/TuanBT/MacMute/issues/new")!)
     }
 
     @objc private func resetToDefault() {

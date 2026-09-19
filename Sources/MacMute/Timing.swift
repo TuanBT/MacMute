@@ -21,12 +21,14 @@ enum Timing {
         FileHandle.standardError.write(Data(out.utf8))
     }
 
-    /// One-off diagnostic line, same gate as the stopwatch.
+    /// One-off diagnostic line. Always goes to the log file; stderr only behind the
+    /// same gate as the stopwatch.
     ///
     /// Stamped, because the questions worth asking of this log are about spacing: a
     /// remapped mouse button that fires the shortcut twice looks identical to two
     /// deliberate presses until you can see they were 8 ms apart.
     static func note(_ message: String) {
+        Log.write(message)
         guard enabled else { return }
         FileHandle.standardError.write(Data((stamp() + " " + message + "\n").utf8))
     }
