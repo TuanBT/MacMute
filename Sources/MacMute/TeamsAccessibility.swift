@@ -141,10 +141,10 @@ final class TeamsAccessibility {
         // whether Teams actually followed has to wait for it.
         queue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self else { return }
-            let after = self.label(of: button)
-            let followed = after.map { $0.contains("unmute") == muted } ?? false
-            Log.write("teams: after press shows \"\(after ?? "nil")\""
-                      + (followed ? "" : " ⚠︎ Teams did NOT follow"))
+            let after: String = self.label(of: button) ?? "nil"
+            let followed = after.contains("unmute") == muted
+            let warning = followed ? "" : " ⚠︎ Teams did NOT follow"
+            Log.write("teams: after press shows \"\(after)\"\(warning)")
         }
     }
 
@@ -156,7 +156,8 @@ final class TeamsAccessibility {
         let found = scan()
         cachedButton = found
         if let found {
-            Log.write("teams: found mute button \"\(label(of: found) ?? "nil")\" in pid \(appPID)")
+            let text: String = label(of: found) ?? "nil"
+            Log.write("teams: found mute button \"\(text)\" in pid \(appPID)")
         }
         if found == nil { cooldownUntil = Date().addingTimeInterval(3) }
         return found

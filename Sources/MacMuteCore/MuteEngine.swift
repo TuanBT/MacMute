@@ -144,8 +144,10 @@ public final class MuteEngine {
             if !muted { restored.append(device.uid) }
         }
 
-        onLog?("engine: \(muted ? "mute" : "unmute") urgent=\(urgent.map(\.uid)) "
-               + "deferred=\(rest.map(\.uid)) applied=\(anyApplied)")
+        let verb = muted ? "mute" : "unmute"
+        let urgentUIDs: [String] = urgent.map(\.uid)
+        let restUIDs: [String] = rest.map(\.uid)
+        onLog?("engine: \(verb) urgent=\(urgentUIDs) deferred=\(restUIDs) applied=\(anyApplied)")
 
         let deferred = rest
         backend.deferWork { [weak self] in
@@ -213,8 +215,9 @@ public final class MuteEngine {
             // Teams and the menu bar all agree is live.
             if backend.setVolume(device.id, 1.0) { applied = true }
         }
-        onLog?("engine:   \(device.uid): restore to muted=\(saved.muted) "
-               + "volume=\(saved.volume.map { String($0) } ?? "nil") -> \(applied ? "ok" : "FAILED")")
+        let level: String = saved.volume.map { String($0) } ?? "nil"
+        let outcome = applied ? "ok" : "FAILED"
+        onLog?("engine:   \(device.uid): restore to muted=\(saved.muted) volume=\(level) -> \(outcome)")
         return applied
     }
 
@@ -382,8 +385,8 @@ public final class MuteEngine {
                 onLog?("engine:   \(device.uid): \(verb) via mute property, verified")
                 return true
             }
-            onLog?("engine:   \(device.uid): mute write accepted but reads back "
-                   + "\(readback.map { String($0) } ?? "nil"), trying volume")
+            let text: String = readback.map { String($0) } ?? "nil"
+            onLog?("engine:   \(device.uid): mute write accepted but reads back \(text), trying volume")
         }
 
         guard device.hasWritableVolume, let volume = backend.volume(of: device.id)
@@ -402,8 +405,8 @@ public final class MuteEngine {
 
         _ = backend.setVolume(device.id, 0)
         guard let readback = backend.volume(of: device.id), readback <= 0.0001 else {
-            onLog?("engine:   \(device.uid): mute FAILED, volume stays at "
-                   + "\(backend.volume(of: device.id).map { String($0) } ?? "nil"), marking deaf")
+            let level: String = backend.volume(of: device.id).map { String($0) } ?? "nil"
+            onLog?("engine:   \(device.uid): mute FAILED, volume stays at \(level), marking deaf")
             markDeaf(device.uid)
             return false
         }

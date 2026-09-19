@@ -109,8 +109,8 @@ final class AudioController: AudioBackend {
         let started = capturingDevices.subtracting(previous)
         let stopped = previous.subtracting(capturingDevices)
         if !started.isEmpty || !stopped.isEmpty {
-            Log.write("capture: started \(names(started)) stopped \(names(stopped)) "
-                      + "now \(names(capturingDevices)), app muted=\(engine.isMuted)")
+            let (on, off, now) = (names(started), names(stopped), names(capturingDevices))
+            Log.write("capture: started \(on) stopped \(off) now \(now), app muted=\(engine.isMuted)")
         }
         if !started.isEmpty {
             // What each device actually holds at the moment a call opens it is the one
@@ -488,8 +488,8 @@ final class AudioController: AudioBackend {
             let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
                 guard let self else { return }
                 let name = self.cache[device]?.name ?? "#\(device)"
-                Log.write("mute property: \(name) -> \(self.mute(of: device).map { String($0) } ?? "nil") "
-                          + "(app muted=\(self.engine.isMuted))")
+                let value: String = self.mute(of: device).map { String($0) } ?? "nil"
+                Log.write("mute property: \(name) -> \(value) (app muted=\(self.engine.isMuted))")
                 switch self.engine.reassertMute(device, now: ProcessInfo.processInfo.systemUptime) {
                 case .notNeeded: break
                 case .remuted, .fellBackToVolume:
@@ -525,18 +525,23 @@ final class AudioController: AudioBackend {
                 let id = device.info.id
                 let mute = Self.readMute(id)
                 let volume = Self.readVolume(id, device.volumeTargets)
-                let silent = mute == true || (volume.map { $0 <= 0.0001 } ?? false)
+                let zeroed: Bool = volume.map { $0 <= 0.0001 } ?? false
+                let silent = mute == true || zeroed
                 var flags: [String] = []
                 if capturing.contains(id) { flags.append("CAPTURING") }
                 if muted && capturing.contains(id) && !silent { flags.append("⚠︎ LIVE WHILE MUTED") }
                 if deaf.contains(device.info.uid) { flags.append("ignores-writes") }
                 if baseline[device.info.uid] != nil { flags.append("has-baseline") }
-                out += "\n    [\(id)] \(device.name) uid=\(device.info.uid)"
-                    + " mute=\(mute.map { String($0) } ?? "n/a")"
-                    + " volume=\(volume.map { String(format: "%.3f", $0) } ?? "n/a")"
-                    + " muteSettable=\(device.info.muteSettable)"
-                    + " volumeWritable=\(device.info.hasWritableVolume)"
-                    + (flags.isEmpty ? "" : " " + flags.joined(separator: " "))
+                // Built a piece at a time: as one expression the older compiler on the
+                // release runner gives up type-checking it.
+                let muteText: String = mute.map { String($0) } ?? "n/a"
+                let volumeText: String = volume.map { String(format: "%.3f", $0) } ?? "n/a"
+                var line = "\n    [\(id)] \(device.name) uid=\(device.info.uid)"
+                line += " mute=\(muteText) volume=\(volumeText)"
+                line += " muteSettable=\(device.info.muteSettable)"
+                line += " volumeWritable=\(device.info.hasWritableVolume)"
+                if !flags.isEmpty { line += " " + flags.joined(separator: " ") }
+                out += line
             }
             Log.write(out)
         }
