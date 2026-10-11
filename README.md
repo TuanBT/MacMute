@@ -52,15 +52,17 @@ Accessibility API is the remaining way to keep that indicator in sync.
   while their window has focus; this one does not care what you are looking at
 - **Mutes every microphone** — not just the system default, because apps like Teams can pick
   a different input device
-- **Teams mute indicator sync** — presses the real Mute button inside the Teams window
-  (requires Accessibility permission)
-- **Follows Teams when a call starts** — a call joins with its own mute state, decided by
-  Teams and knowing nothing about the mute left over from the last one. MacMute reads the
-  Teams button once, at that moment, and matches the microphone to it, so the first press
-  of the shortcut moves both instead of spending itself putting them back in step. When
-  the call ends it gives that state back, because a mute borrowed from Teams should not
-  outlive the meeting — a mute you made yourself still does. Nothing to switch on: it
-  needs no setting and does nothing at all without Teams or without Accessibility
+- **Teams mute indicator sync** — presses the real Mute button inside the Teams window,
+  and presses it again if Teams does not follow (requires Accessibility permission)
+- **Follows Teams, both ways** — a call joins with its own mute state, decided by Teams and
+  knowing nothing about the mute left over from the last one, so MacMute reads the Teams
+  button when a call starts and matches the microphone to it. It keeps reading it for as
+  long as the call has the microphone open: mute or unmute inside Teams — its button, its
+  own shortcut, a headset Teams listens to — and the microphone follows, instead of Teams
+  showing you live over a microphone that is still muted. When the call ends it gives
+  back what it borrowed, because a mute borrowed from Teams should not outlive the
+  meeting — a mute you made yourself still does. Nothing to switch on: it needs no
+  setting and does nothing at all without Teams or without Accessibility
 - **Works with all apps** — Zoom, Meet, Slack, Discord, FaceTime, and more
 - **Audio feedback** — four sound styles (Click, Soft, Marimba, Chime) or off; falling tone
   for mute, rising for unmute. Hover over each option to preview the sound live
@@ -69,8 +71,9 @@ Accessibility API is the remaining way to keep that indicator in sync.
   listening — still slashed if the mute is on, so a mute left over from a meeting is
   stated rather than shouted
 - **Safe** — restores all microphones on quit, on crash signals, and on next launch
-- **Lightweight** — 0% CPU when idle, nothing polled while you are not pressing anything,
-  about 4 ms from keypress to silence
+- **Lightweight** — 0% CPU when idle: nothing is polled while no app has the microphone
+  open, and during a call the only regular work is a glance at the Teams button twice a
+  second. About 4 ms from keypress to silence
 - **Launch at Login** — start automatically with macOS
 
 ## Install
@@ -89,8 +92,8 @@ Accessibility API is the remaining way to keep that indicator in sync.
    **System Settings › Privacy & Security** and click **Open Anyway**.
 
 3. On first launch, macOS asks for **Accessibility** permission. Grant it so MacMute can
-   press the Mute button inside Teams. Deny it and muting still works — you only lose the
-   visible mute indicator in Teams.
+   press and read the Mute button inside Teams. Deny it and muting still works — you only
+   lose the visible mute indicator in Teams, and MacMute following what you do there.
 
    The ad-hoc signature changes on every release, so when upgrading, remove the old
    MacMute entry from that list before granting it again.
@@ -165,8 +168,9 @@ Yes — free, open source, MIT licensed. No account, no subscription, no analyti
 
 ### What permissions does it need?
 
-Muting needs none at all. **Accessibility** is only used to press the Mute button inside
-Teams; deny it and everything else still works, you simply lose the in-app indicator.
+Muting needs none at all. **Accessibility** is only used to press and read the Mute
+button inside Teams; deny it and everything else still works, you simply lose the in-app
+indicator.
 MacMute never asks for microphone access, because it silences the device rather than
 listening to it.
 
@@ -203,12 +207,26 @@ key. MacMute also watches the modifier keys themselves, gives up on any hold aft
 seconds, and ends one on sleep, on a locked screen, and on a switched session. A hold that
 goes missing always ends with the microphone back where it started, never left open.
 
+### What happens if I mute or unmute inside Teams itself?
+
+MacMute follows. While a call has the microphone open it reads the Teams Mute button
+twice a second, so clicking it, using Teams' own shortcut or pressing a headset button
+that Teams listens to moves MacMute's mute too, with the same tone the shortcut plays.
+What it borrowed from Teams is given back when the call ends. The other direction works
+as before: the shortcut presses the Teams button, and presses it again if Teams does not
+follow. If Teams still refuses — an organiser's hard mute does — you hear the error tone.
+
 ### What if something unmutes my microphone behind MacMute's back?
 
 A driver resetting, a headset switching Bluetooth profile or another app can clear a
-device's mute. MacMute watches for that and mutes the device again at once. If the mute
-keeps coming off, it holds the device at zero volume instead. If neither works, it plays
-the error tone and shows a warning, so the icon never claims a mute that is gone.
+device's mute — and so does Teams, which writes its own mute into the device, so
+unmuting inside Teams clears MacMute's. MacMute mutes the device again at once, then asks
+Teams. If Teams shows you live, that was you unmuting in Teams, and the microphone
+follows. If Teams shows you muted, the mute stays. If MacMute cannot see Teams at all,
+the mute stays and you hear the mute tone, so you know you are still not being heard.
+If the mute keeps coming off, it holds the device at zero volume instead. If neither
+works, it plays the error tone and shows a warning, so the icon never claims a mute
+that is gone.
 
 ### I was heard while muted — how do I report it?
 

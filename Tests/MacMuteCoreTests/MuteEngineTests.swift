@@ -15,6 +15,9 @@ private struct FakeDevice {
     /// Takes volume writes but not mute writes — a driver that keeps resetting its
     /// mute, as some do on a format change.
     var ignoresMuteWrites = false
+    /// The lowest level a volume write can reach. Some devices step their gain and
+    /// stop short of zero.
+    var volumeFloor: Float = 0
 }
 
 private final class FakeBackend: AudioBackend {
@@ -47,7 +50,7 @@ private final class FakeBackend: AudioBackend {
     func setVolume(_ id: UInt32, _ volume: Float) -> Bool {
         setVolumeCalls += 1
         guard var device = devices[id], device.hasWritableVolume else { return false }
-        if !device.ignoresWrites { device.volume = volume }
+        if !device.ignoresWrites { device.volume = max(volume, device.volumeFloor) }
         devices[id] = device
         return true
     }
@@ -397,5 +400,138 @@ final class MuteEngineTests: XCTestCase {
         backend.devices[1]!.ignoresMuteWrites = true
 
         XCTAssertEqual(engine.reassertMute(1, now: 0), .failed)
+    }
+
+    /// The virtual Teams device takes a write, discards it, and fires the mute
+    /// notification still reading live. Guarded as though it had lost a mute of ours,
+    /// it raised the critical alert eight times in 25 seconds, with nothing even
+    /// capturing from it.
+    func testDeviceThatIgnoresWritesIsNotGuarded() {
+        let (engine, backend) = engine([
+            1: FakeDevice(uid: "BuiltInMicrophoneDevice", muteSettable: true,
+                          hasWritableVolume: true, capturing: true),
+            2: FakeDevice(uid: "MSLoopbackDriverDevice_UID", muteSettable: true,
+                          hasWritableVolume: true, ignoresWrites: true),
+        ])
+        engine.setMuted(true)
+        XCTAssertTrue(engine.deafDevices.contains("MSLoopbackDriverDevice_UID"))
+        XCTAssertNil(engine.baseline["MSLoopbackDriverDevice_UID"], "it took none of our writes")
+
+        XCTAssertEqual(engine.reassertMute(2, now: 0), .notNeeded,
+                       "a mute it never wore cannot have been lost")
+        XCTAssertFalse(backend.devices[2]!.muted)
+    }
+
+    /// Once a device is marked as ignoring writes nothing writes to it again, so a level
+    /// the attempt did move — down to a floor rather than to zero — has to go back first.
+    func testFailedAttemptIsUndoneBeforeTheDeviceIsGivenUp() {
+        var stepped = FakeDevice(uid: "usb-stepped", muteSettable: true, hasWritableVolume: true,
+                                 ignoresMuteWrites: true, volumeFloor: 0.01)
+        stepped.volume = 0.8
+        let (engine, backend) = engine([1: stepped])
+
+        XCTAssertFalse(engine.setMuted(true))
+        XCTAssertTrue(engine.deafDevices.contains("usb-stepped"))
+        XCTAssertEqual(backend.devices[1]!.volume, 0.8, "left at 0.01 it is a dead microphone")
+    }
+
+    // MARK: - Devices with nothing to write
+
+    /// The aggregates macOS builds per process for voice processing have neither a mute
+    /// nor a level. Each used to get a baseline entry no restore could clear, and eighty
+    /// of them were being rewritten to disk inside every keypress.
+    func testDeviceWithNothingToWriteIsLeftOutOfTheBaseline() {
+        let (engine, _) = engine([
+            1: FakeDevice(uid: "BuiltInMicrophoneDevice", muteSettable: true, hasWritableVolume: true),
+            2: FakeDevice(uid: "CADefaultDeviceAggregate-1367-65", muteSettable: false,
+                          hasWritableVolume: false),
+        ])
+        engine.setMuted(true)
+        XCTAssertNil(engine.baseline["CADefaultDeviceAggregate-1367-65"])
+        XCTAssertFalse(engine.deafDevices.contains("CADefaultDeviceAggregate-1367-65"),
+                       "never written to, so there is nothing to have ignored")
+        engine.setMuted(false)
+        XCTAssertTrue(engine.baseline.isEmpty)
+    }
+
+    /// The entries already on disk go on the next unmute. A per-process aggregate never
+    /// comes back under the same name; an unplugged headset does, and is still owed.
+    func testDepartedAggregatesAreForgottenButAnUnpluggedHeadsetIsNot() {
+        let (engine, backend) = engine([
+            1: FakeDevice(uid: "BuiltInMicrophoneDevice", muteSettable: true, hasWritableVolume: true),
+        ])
+        backend.devices[1]!.muted = true
+        engine.restore(from: [
+            "BuiltInMicrophoneDevice": MuteEngine.Baseline(muted: false, volume: 0.8),
+            "CADefaultDeviceAggregate-1367-65": MuteEngine.Baseline(muted: false, volume: nil),
+            "CADefaultDeviceAggregate-1367-66": MuteEngine.Baseline(muted: false, volume: nil),
+            "41-42-FF-E9-0C-04:input": MuteEngine.Baseline(muted: false, volume: 0.6),
+        ])
+        XCTAssertFalse(backend.devices[1]!.muted)
+        XCTAssertEqual(Set(engine.baseline.keys), ["41-42-FF-E9-0C-04:input"])
+    }
+
+    // MARK: - The microphone a call is using
+
+    /// Teams writes its own mute into the device it uses. Found there when the shortcut
+    /// mutes, that used to be recorded as the user's own and handed back on unmute —
+    /// the icon green and the call hearing nothing.
+    func testUnmuteOpensTheMicrophoneInUseWhateverItWasFoundWith() {
+        var inUse = FakeDevice(uid: "BuiltInMicrophoneDevice", muteSettable: true,
+                               hasWritableVolume: true, capturing: true)
+        inUse.muted = true
+        var idle = FakeDevice(uid: "AppleUSBAudioEngine:K30", muteSettable: true,
+                              hasWritableVolume: true)
+        idle.muted = true
+        let (engine, backend) = engine([1: inUse, 2: idle])
+
+        engine.setMuted(true)
+        engine.setMuted(false)
+
+        XCTAssertFalse(backend.devices[1]!.muted, "an unmute is asking to be heard through it")
+        XCTAssertTrue(backend.devices[2]!.muted,
+                      "nothing listens through the other, so its own mute stays")
+    }
+
+    func testDeviceReturningDuringACallComesBackLive() {
+        var headset = FakeDevice(uid: "41-42-FF-E9-0C-04:input", muteSettable: true,
+                                 hasWritableVolume: true)
+        headset.muted = true
+        let (engine, backend) = engine([1: headset])
+        engine.setMuted(true)
+        let away = backend.devices.removeValue(forKey: 1)!
+        engine.setMuted(false)
+
+        var back = away
+        back.capturing = true
+        backend.devices[1] = back
+        engine.adoptNewDevices()
+        XCTAssertFalse(backend.devices[1]!.muted)
+    }
+
+    /// Teams and the app both say live and the device a call opened on is muted, left
+    /// that way by something else. Nothing on screen would explain the silence.
+    func testOpenCapturingDevicesClearsAMuteLeftFromOutside() {
+        var inUse = FakeDevice(uid: "BuiltInMicrophoneDevice", muteSettable: true,
+                               hasWritableVolume: true, capturing: true)
+        inUse.muted = true
+        var idle = FakeDevice(uid: "AppleUSBAudioEngine:K30", muteSettable: true,
+                              hasWritableVolume: true)
+        idle.muted = true
+        let (engine, backend) = engine([1: inUse, 2: idle])
+
+        XCTAssertEqual(engine.openCapturingDevices(), ["BuiltInMicrophoneDevice"])
+        XCTAssertFalse(backend.devices[1]!.muted)
+        XCTAssertTrue(backend.devices[2]!.muted, "not in use, so its mute is in nobody's way")
+    }
+
+    func testOpenCapturingDevicesNeverLiftsOurOwnMute() {
+        let (engine, backend) = engine([
+            1: FakeDevice(uid: "BuiltInMicrophoneDevice", muteSettable: true,
+                          hasWritableVolume: true, capturing: true),
+        ])
+        engine.setMuted(true)
+        XCTAssertEqual(engine.openCapturingDevices(), [])
+        XCTAssertTrue(backend.devices[1]!.muted)
     }
 }

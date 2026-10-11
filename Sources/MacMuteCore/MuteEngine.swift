@@ -104,7 +104,7 @@ public final class MuteEngine {
         // well behave this time.
         corrections = [:]
 
-        let devices = backend.inputDevices()
+        let devices = manageableDevices()
 
         // Reading the baseline is cheap and has to happen before anything is written,
         // so it covers every device. The writes are what cost — a USB device is about
@@ -122,6 +122,9 @@ public final class MuteEngine {
         }
         let urgent = capturing.isEmpty ? devices : capturing
         let rest = capturing.isEmpty ? [] : idle
+        // Taken here, on the caller's thread, because the deferred pass must not ask the
+        // backend: what it knows about capture belongs to the main thread.
+        let inUse = Set(capturing.map(\.id))
 
         // Reading a baseline is two more round trips per device, so the idle ones are
         // read in the deferred pass, immediately before they are written.
@@ -139,7 +142,7 @@ public final class MuteEngine {
         var anyApplied = false
         var restored: [String] = []
         for device in urgent {
-            guard drive(muted, device, snapshot) else { continue }
+            guard drive(muted, device, snapshot, inUse: inUse.contains(device.id)) else { continue }
             anyApplied = true
             if !muted { restored.append(device.uid) }
         }
@@ -186,7 +189,10 @@ public final class MuteEngine {
         // Bug B: only devices actually put back are forgotten. One that could not be
         // reached — unplugged, asleep, gone with the app that summoned it — keeps its
         // entry, so there is still something to restore it with when it returns.
-        if !muted { forget(restored) }
+        if !muted {
+            forget(restored)
+            _ = prune()
+        }
         isMuted = muted
         publishBaseline()
 
@@ -194,8 +200,19 @@ public final class MuteEngine {
     }
 
     /// Moves one device to `muted`, or back to the baseline when unmuting.
+    ///
+    /// `inUse` is whether something is capturing from it. An unmute is the user asking
+    /// to be heard, so that device comes back live whatever it was wearing when the
+    /// mute began — and what it was wearing was usually not the user's doing. Teams
+    /// writes its own mute into the device it uses and leaves it there when it moves to
+    /// another; recorded as "the user had it muted", that mute came back on every
+    /// unmute, 194 times in one week of logs. Once it was the microphone a call was
+    /// using: an unmute that turned the icon green and let nobody hear a word.
+    ///
+    /// A device nothing is listening through keeps the mute it was found with, which is
+    /// the rule everywhere else: the app does not take off a mute it did not put on.
     private func drive(_ muted: Bool, _ device: AudioDeviceInfo,
-                       _ baseline: [String: Baseline]) -> Bool {
+                       _ baseline: [String: Baseline], inUse: Bool = false) -> Bool {
         guard !muted else { return apply(muted: true, to: device) }
 
         backend.stopVolumeGuard(device.id)
@@ -204,8 +221,12 @@ public final class MuteEngine {
             // Appeared after we muted, so it was never the user's own mute.
             return apply(muted: false, to: device)
         }
+        let restoreMuted = saved.muted && !inUse
+        if saved.muted && inUse {
+            onLog?("engine:   \(device.uid): was muted when found, but it is in use, opening it")
+        }
         var applied = false
-        if device.muteSettable, backend.setMute(device.id, saved.muted) { applied = true }
+        if device.muteSettable, backend.setMute(device.id, restoreMuted) { applied = true }
         if let volume = saved.volume {
             if backend.setVolume(device.id, volume) { applied = true }
         } else if let current = backend.volume(of: device.id), current <= 0.0001 {
@@ -217,7 +238,7 @@ public final class MuteEngine {
         }
         let level: String = saved.volume.map { String($0) } ?? "nil"
         let outcome = applied ? "ok" : "FAILED"
-        onLog?("engine:   \(device.uid): restore to muted=\(saved.muted) volume=\(level) -> \(outcome)")
+        onLog?("engine:   \(device.uid): restore to muted=\(restoreMuted) volume=\(level) -> \(outcome)")
         return applied
     }
 
@@ -230,10 +251,54 @@ public final class MuteEngine {
         lock.unlock()
     }
 
+    /// Per-process aggregate devices carry their client's pid in the UID, so one that
+    /// has gone never comes back under the same name.
+    public static func isEphemeral(_ uid: String) -> Bool {
+        uid.hasPrefix("CADefaultDeviceAggregate-")
+    }
+
+    /// The devices worth writing to: something to write, and a record of it being heard.
+    ///
+    /// The per-process aggregates macOS builds for voice processing have neither a mute
+    /// nor a level. Each one used to get a baseline entry that no restore could ever
+    /// clear, because there was nothing to restore, and Bug B rightly keeps an entry
+    /// that was not restored — so they piled up: eighty of them in one week, every one
+    /// rewritten to disk inside every keypress. A device known to ignore writes is left
+    /// out for the same reason, and for one more: the guard used to treat its discarded
+    /// write as a mute "lost", and raised the critical alert eight times in 25 seconds
+    /// over the virtual Teams device, which nothing was even capturing from.
+    private func manageableDevices() -> [AudioDeviceInfo] {
+        lock.lock()
+        let deaf = deafDevices
+        lock.unlock()
+        return backend.inputDevices().filter { device in
+            (device.muteSettable || device.hasWritableVolume) && !deaf.contains(device.uid)
+        }
+    }
+
+    /// Drops entries no restore can ever settle: a device that ignores writes, a device
+    /// with nothing to write, and a per-process aggregate that has gone. Everything
+    /// else that is away keeps its entry, which is Bug B's whole point. Returns whether
+    /// anything went.
+    private func prune() -> Bool {
+        let present = backend.inputDevices()
+        let usable = Set(manageableDevices().map(\.uid))
+        let here = Set(present.map(\.uid))
+        lock.lock()
+        let stale = baseline.keys.filter { uid in
+            if deafDevices.contains(uid) { return true }
+            return here.contains(uid) ? !usable.contains(uid) : Self.isEphemeral(uid)
+        }
+        for uid in stale { baseline.removeValue(forKey: uid) }
+        lock.unlock()
+        if !stale.isEmpty { onLog?("engine: forgot \(stale.count) entries nothing can restore") }
+        return !stale.isEmpty
+    }
+
     /// Mutes anything that arrived while we were already muted, so plugging in a
     /// headset does not silently hand back a live microphone.
     public func adoptNewDevices() {
-        let devices = backend.inputDevices()
+        let devices = manageableDevices()
         let known = currentBaseline()
 
         guard isMuted else {
@@ -243,10 +308,12 @@ public final class MuteEngine {
             guard !known.isEmpty else { return }
             var done: [String] = []
             for device in devices where known[device.uid] != nil {
-                if drive(false, device, known) { done.append(device.uid) }
+                let inUse = backend.isCapturing(device.id)
+                if drive(false, device, known, inUse: inUse) { done.append(device.uid) }
             }
-            guard !done.isEmpty else { return }
             forget(done)
+            let pruned = prune()
+            guard pruned || !done.isEmpty else { return }
             publishBaseline()
             return
         }
@@ -285,10 +352,17 @@ public final class MuteEngine {
     /// Our own writes fire the same notification, which is why the test is "reads live
     /// while muted" and never "something changed". The window is the backstop against a
     /// device that keeps flipping back: past it, the volume takes over.
+    ///
+    /// Putting the mute back is only half the answer when the device is in use, because
+    /// the most common thing taking it off is Teams: it writes its own mute into the
+    /// device, so unmuting inside Teams clears ours. Whether to keep the mute or follow
+    /// Teams is decided above this, by asking Teams — the mute goes back first, so the
+    /// microphone is never open while that question is being answered.
     @discardableResult
     public func reassertMute(_ id: UInt32, now: TimeInterval) -> Reassertion {
         guard isMuted, backend.mute(of: id) == false,
               let device = backend.inputDevices().first(where: { $0.id == id }),
+              !isDeaf(device.uid),
               currentBaseline()[device.uid] != nil else { return .notNeeded }
 
         var recent = (corrections[device.uid] ?? []).filter { now - $0 < Self.correctionWindow }
@@ -314,6 +388,29 @@ public final class MuteEngine {
         return .failed
     }
 
+    /// Takes the mute off every microphone something is listening through, for when the
+    /// app and Teams both say live and the device disagrees. Returns what it opened.
+    ///
+    /// The app does not lift a mute it did not put on, as a rule, and this is the one
+    /// place the rule protects nobody. Teams shows you live, the menu bar shows you
+    /// live, and the only thing still muted is the device the call is using — left that
+    /// way by something else, most often Teams itself, which writes its mute into a
+    /// device and leaves it there when it moves to another. The log shows calls opening
+    /// on a microphone in that state while the app said live: a dead call that every
+    /// indicator on screen calls live.
+    public func openCapturingDevices() -> [String] {
+        guard !isMuted else { return [] }
+        var opened: [String] = []
+        for device in backend.inputDevices() where backend.isCapturing(device.id) {
+            guard device.muteSettable, !isDeaf(device.uid), backend.mute(of: device.id) == true,
+                  backend.setMute(device.id, false), backend.mute(of: device.id) == false
+            else { continue }
+            opened.append(device.uid)
+        }
+        if !opened.isEmpty { onLog?("engine: opened \(opened), muted from outside while live") }
+        return opened
+    }
+
     /// Puts back a baseline recovered from disk after the process was killed while muted.
     public func restore(from saved: [String: Baseline]) {
         guard !saved.isEmpty else { return }
@@ -327,6 +424,11 @@ public final class MuteEngine {
     private func isCurrent(_ epoch: Int) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return epoch == generation
+    }
+
+    private func isDeaf(_ uid: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return deafDevices.contains(uid)
     }
 
     private func recordBaseline(_ device: AudioDeviceInfo) {
@@ -350,11 +452,22 @@ public final class MuteEngine {
         onBaselineChange?(currentBaseline())
     }
 
-    private func markDeaf(_ uid: String) {
+    /// Once marked, nothing here writes to the device again, so whatever the failed
+    /// attempt did manage is undone first — a level that went down to 0.01 rather than
+    /// zero would otherwise stay there for good. Then its entry goes: it records nothing
+    /// we still owe, and keeping it is what let the guard mistake the device's discarded
+    /// writes for a lost mute.
+    private func markDeaf(_ device: AudioDeviceInfo) {
+        if let saved = currentBaseline()[device.uid] {
+            if device.muteSettable { _ = backend.setMute(device.id, saved.muted) }
+            if let level = saved.volume, device.hasWritableVolume { _ = backend.setVolume(device.id, level) }
+        }
         lock.lock()
-        deafDevices.insert(uid)
+        deafDevices.insert(device.uid)
+        baseline.removeValue(forKey: device.uid)
+        let deaf = deafDevices
         lock.unlock()
-        onDeafDevicesChange?(deafDevices)
+        onDeafDevicesChange?(deaf)
     }
 
     /// Persisted so a device that ignores writes is never retried, not even once per
@@ -392,7 +505,7 @@ public final class MuteEngine {
         guard device.hasWritableVolume, let volume = backend.volume(of: device.id)
         else {
             onLog?("engine:   \(device.uid): \(verb) FAILED, no usable mute or volume")
-            if muted { markDeaf(device.uid) }
+            if muted { markDeaf(device) }
             return false
         }
         guard muted else {
@@ -407,7 +520,7 @@ public final class MuteEngine {
         guard let readback = backend.volume(of: device.id), readback <= 0.0001 else {
             let level: String = backend.volume(of: device.id).map { String($0) } ?? "nil"
             onLog?("engine:   \(device.uid): mute FAILED, volume stays at \(level), marking deaf")
-            markDeaf(device.uid)
+            markDeaf(device)
             return false
         }
         // Only guard a device that demonstrably honours the write, because Teams

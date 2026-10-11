@@ -38,6 +38,17 @@ final class AudioController: AudioBackend {
     /// the user has to be told rather than left believing the icon.
     var onMuteLost: (() -> Void)?
 
+    /// Fires when a microphone something is listening through lost the mute we put on
+    /// it, once the mute is back on. Teams is usually what took it off — it writes its
+    /// own mute into the device, so unmuting inside Teams clears ours — and whether that
+    /// was the user is for whoever can ask Teams to find out.
+    var onReopenedWhileMuted: (() -> Void)?
+
+    /// Fires when a microphone something is listening through reads muted while the app
+    /// says live: muted from inside Teams, which writes that into the device too, or
+    /// left muted by something else on the device a call has just started using.
+    var onSilencedWhileLive: (() -> Void)?
+
     /// What each device can do, resolved once per device-list change. Probing this on
     /// every keypress cost tens of milliseconds against about 1.5 ms for the writes.
     private struct CachedDevice {
@@ -77,7 +88,7 @@ final class AudioController: AudioBackend {
             // Per-process aggregates carry the client's pid in their UID, so they never
             // recur and remembering one helps nobody. Left in, the list grew by a few
             // entries every session and was never read usefully again.
-            let durable = uids.filter { !$0.hasPrefix("CADefaultDeviceAggregate-") }
+            let durable = uids.filter { !MuteEngine.isEphemeral($0) }
             UserDefaults.standard.set(durable.sorted(), forKey: Self.deafKey)
         }
         recoverFromCrashIfNeeded()
@@ -92,6 +103,10 @@ final class AudioController: AudioBackend {
 
     @discardableResult
     func setMuted(_ muted: Bool) -> Bool { engine.setMuted(muted) }
+
+    /// Clears a mute something else left on a microphone in use, for when the app and
+    /// Teams both say live. Returns what it opened.
+    func openCapturingDevices() -> [String] { engine.openCapturingDevices() }
 
     /// True while any app is capturing from any input device — the same signal behind
     /// the orange dot macOS shows in the menu bar.
@@ -117,6 +132,11 @@ final class AudioController: AudioBackend {
             // reading that can tell a mute that never landed from one undone later.
             logSnapshot("capture started")
             onCaptureStarted?()
+            // A call opening on a device that something else left muted, with the app
+            // saying live: the icon goes green over a microphone nobody can hear.
+            if !engine.isMuted, started.contains(where: { mute(of: $0) == true }) {
+                onSilencedWhileLive?()
+            }
         }
     }
 
@@ -488,12 +508,19 @@ final class AudioController: AudioBackend {
             let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
                 guard let self else { return }
                 let name = self.cache[device]?.name ?? "#\(device)"
-                let value: String = self.mute(of: device).map { String($0) } ?? "nil"
+                let mute = self.mute(of: device)
+                let value: String = mute.map { String($0) } ?? "nil"
                 Log.write("mute property: \(name) -> \(value) (app muted=\(self.engine.isMuted))")
+                let inUse = self.capturingDevices.contains(device)
                 switch self.engine.reassertMute(device, now: ProcessInfo.processInfo.systemUptime) {
-                case .notNeeded: break
+                case .notNeeded:
+                    // None of our own writes mutes a device in use while the app says
+                    // live — an unmute opens it, and isMuted is already true by the time
+                    // a mute's notification lands here — so this came from outside.
+                    if inUse, mute == true, !self.engine.isMuted { self.onSilencedWhileLive?() }
                 case .remuted, .fellBackToVolume:
                     self.logSnapshot("after putting back the mute on \(name)", after: 0.3)
+                    if inUse { self.onReopenedWhileMuted?() }
                 case .failed:
                     self.logSnapshot("mute lost on \(name)")
                     self.onMuteLost?()
@@ -509,7 +536,8 @@ final class AudioController: AudioBackend {
 
     /// Writes what every input device actually holds right now, read from the HAL rather
     /// than from anything the app remembers. The line to look for is a capturing device
-    /// marked LIVE while the app says muted: that is being heard.
+    /// marked LIVE while the app says muted: that is being heard. Its mirror, SILENT
+    /// while the app says live, is a call that cannot hear you under a green icon.
     ///
     /// The list is taken here on the main thread, where the cache lives, and the reads
     /// happen elsewhere so a slow Bluetooth device never lands on the keypress.
@@ -530,6 +558,7 @@ final class AudioController: AudioBackend {
                 var flags: [String] = []
                 if capturing.contains(id) { flags.append("CAPTURING") }
                 if muted && capturing.contains(id) && !silent { flags.append("⚠︎ LIVE WHILE MUTED") }
+                if !muted && capturing.contains(id) && silent { flags.append("⚠︎ SILENT WHILE LIVE") }
                 if deaf.contains(device.info.uid) { flags.append("ignores-writes") }
                 if baseline[device.info.uid] != nil { flags.append("has-baseline") }
                 // Built a piece at a time: as one expression the older compiler on the

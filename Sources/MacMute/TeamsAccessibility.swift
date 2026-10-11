@@ -1,7 +1,8 @@
 import AppKit
 import ApplicationServices
+import MacMuteCore
 
-/// Presses the Teams mute button through the Accessibility API.
+/// Reads and presses the Teams mute button through the Accessibility API.
 ///
 /// Microsoft retired the local API that used to do this without any permission — Teams
 /// 26198 still answered on port 8124, 26213 no longer opens it — so this is the only
@@ -12,16 +13,25 @@ import ApplicationServices
 /// silenced by the audio device either way, which is the part that must never depend
 /// on a permission being granted.
 ///
-/// Unlike the version this replaces, it never runs on the main thread, never blocks a
-/// keypress, and never drives the menu bar icon. The icon follows the HAL, which is
-/// the layer that actually decides whether the microphone is live.
+/// It never runs on the main thread, never blocks a keypress, and never drives the
+/// menu bar icon. The icon follows the HAL, which is the layer that actually decides
+/// whether the microphone is live.
+///
+/// It works both ways. A press of the shortcut presses the button, and presses it again
+/// if the label shows Teams did not follow. And for as long as anything has a
+/// microphone open the button is read twice a second, so a mute changed inside Teams —
+/// its own button, its own shortcut, a headset Teams listens to — reaches the app,
+/// instead of leaving Teams showing you live over a muted microphone. What each reading
+/// means is decided in `TeamsSync`; this type only talks to Teams.
 ///
 /// Measured against Teams 26213: locating the button costs about 35 ms, the press
 /// itself 0.1 ms, and the label still reads "mute mic" immediately afterwards, turning
 /// into "unmute mic" only around 100 ms later. Reading it back straight after the press
-/// — which the version this replaces did — therefore always returned the previous
-/// value, and that is what used to leave the icon showing the opposite of reality.
+/// — which an earlier version did — therefore always returned the previous value, and
+/// that is what used to leave the icon showing the opposite of reality.
 final class TeamsAccessibility {
+
+    enum Reading { case muted, live, unknown }
 
     private static let bundleIDs = ["com.microsoft.teams2", "com.microsoft.teams"]
     private static let strongLabels: Set<String> = ["mute mic", "unmute mic"]
@@ -34,134 +44,220 @@ final class TeamsAccessibility {
     /// is a toolbar button.
     private static let maxFallbackLabel = 30
 
+    /// How often the button is read while a microphone is open. From the cached element
+    /// that is two attribute reads; the scan that finds the element again runs far less
+    /// often, at the pace `TeamsSync.scanGap` sets.
+    private static let watchInterval: TimeInterval = 0.5
+
     private let queue = DispatchQueue(label: "com.tuanbt.macmute.ax", qos: .userInitiated)
 
+    // Everything below is queue confined.
     private var appElement: AXUIElement?
     private var appPID: pid_t = 0
     private var cachedButton: AXUIElement?
-    private var cooldownUntil = Date.distantPast
+    private var lastFailedScan = -TimeInterval.infinity
+    private var sync = TeamsSync()
+    /// Bumped by every start and stop, so a tick left over from a watch that has ended
+    /// stops itself.
+    private var watch = 0
+    /// The latest press the main thread has told us about. It goes out with every
+    /// report, so a reading taken before a newer press is recognised there and dropped.
+    private var serial = 0
+    private var reportedMissing = false
 
-    /// Bumped by anything that makes a pending read stale. Queue confined, like every
-    /// other field here.
-    private var readEpoch = 0
+    /// Teams showed something it was not asked to: a change made inside Teams, or the
+    /// first reading of a call. Main queue.
+    var onChange: ((_ teamsMuted: Bool, _ serial: Int, _ first: Bool) -> Void)?
+
+    /// Teams would not follow the shortcut, however often it was pressed. Main queue.
+    var onGaveUp: ((_ target: Bool) -> Void)?
 
     /// True once the user has granted Accessibility. Never prompts.
     static var isTrusted: Bool { AXIsProcessTrusted() }
 
-    /// Best effort, fire and forget. Returns immediately.
-    func setMuted(_ muted: Bool) {
+    private var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
+
+    /// Moves Teams to where the user just sent the microphone. Fire and forget: returns
+    /// at once, and keeps at it in the background until Teams shows it or gives up.
+    func setMuted(_ muted: Bool, serial: Int) {
         guard Self.isTrusted else {
             Log.write("teams: no Accessibility permission, button not touched")
             return
         }
         queue.async { [weak self] in
             guard let self else { return }
-            // A press is the user saying where they want to be. A read still in flight
-            // from a call that just started must not land on top of it a second later
-            // and undo it.
-            self.readEpoch += 1
-            self.press(target: muted)
+            self.serial = serial
+            self.sync.ask(muted, serial: serial, at: self.now)
+            self.reportedMissing = false
+            self.deliver()
         }
     }
 
-    /// Reads what Teams itself shows, so the app can follow Teams instead of only ever
-    /// pushing at it.
-    ///
-    /// A call starting is the one moment the two are guaranteed to disagree: Teams
-    /// joins with whatever mute state its own settings and the meeting decide, knowing
-    /// nothing about the mute this app was still holding from the last call. Left
-    /// disagreeing, the next press of the shortcut spends itself moving the half that
-    /// was already where the user wanted it — which is why it took two.
-    ///
-    /// The meeting toolbar is not there the instant capture starts, so this retries
-    /// within `window` and simply never answers when no mute button ever appears: no
-    /// call in progress, Teams not running, or no Accessibility permission. The
-    /// completion runs on the main queue, at most once.
-    func readMuted(within window: TimeInterval = 8, _ completion: @escaping (Bool) -> Void) {
+    /// Something opened a microphone. Reads the button until `stopWatching`.
+    func startWatching() {
         guard Self.isTrusted else { return }
         queue.async { [weak self] in
-            guard let self else { return }
-            self.readEpoch += 1
-            self.attemptRead(self.readEpoch, until: Date().addingTimeInterval(window),
-                             after: 0.4, completion)
+            guard let self, !self.sync.isWatching else { return }
+            self.sync.begin(at: self.now)
+            self.watch += 1
+            // A call starting is exactly what a scan that failed a moment ago would hide.
+            self.lastFailedScan = -.infinity
+            let watch = self.watch
+            // The meeting toolbar is not there the instant capture starts.
+            self.queue.asyncAfter(deadline: .now() + 0.4) { [weak self] in self?.tick(watch) }
         }
     }
 
-    private func attemptRead(_ epoch: Int, until deadline: Date, after delay: TimeInterval,
-                             _ completion: @escaping (Bool) -> Void) {
-        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self, epoch == self.readEpoch else { return }
-            // A call starting is exactly what a cooldown left over from the last failed
-            // scan would hide, and the one moment a scan is certainly worth paying for.
-            self.cooldownUntil = .distantPast
-            if let button = self.resolveButton(), let label = self.label(of: button) {
-                // Same reading as the press path: the label names the action, so
-                // "unmute mic" means Teams is muted right now.
-                let muted = label.contains("unmute")
-                Log.write("teams: call start read \"\(label)\" -> Teams is \(muted ? "muted" : "live")")
-                DispatchQueue.main.async { completion(muted) }
-                return
-            }
-            guard Date() < deadline else {
-                Log.write("teams: call start read found no mute button, giving up")
-                return
-            }
-            self.attemptRead(epoch, until: deadline, after: 1.5, completion)
+    /// Nothing has had a microphone open for a while: the call is over.
+    func stopWatching() {
+        queue.async { [weak self] in
+            guard let self, self.sync.isWatching else { return }
+            self.sync.end()
+            self.watch += 1
         }
+    }
+
+    /// Reads Teams for a decision about a microphone whose mute just changed underneath
+    /// the app. Tries at each delay in turn, since the label flips about 100 ms after
+    /// Teams does and the button may not be on screen yet; `.unknown` when it never
+    /// turns up. The completion runs on the main queue.
+    ///
+    /// Never answers while a press of ours is on its way to Teams: that press is what
+    /// Teams is about to show, whatever it shows this instant, and it may well be what
+    /// moved the device. A press still waiting for a button to appear is another
+    /// matter — it is delivered if the button is there now, and otherwise this answers
+    /// `.unknown` like any other look that found nothing.
+    func check(after delays: [TimeInterval], _ completion: @escaping (Reading) -> Void) {
+        guard Self.isTrusted else {
+            DispatchQueue.main.async { completion(.unknown) }
+            return
+        }
+        queue.async { [weak self] in self?.attemptCheck(delays[...], completion) }
     }
 
     // MARK: - Work, entirely off the main thread
 
-    private func press(target muted: Bool) {
-        guard let button = resolveButton() else {
-            Log.write("teams: no mute button found (no call, or Teams not running)")
+    /// Moves Teams toward the standing request, or leaves the request standing for the
+    /// watch to deliver once the button can be found.
+    private func deliver() {
+        guard let request = sync.request else { return }
+        let wait = sync.wait(at: now)
+        guard wait == 0 else {
+            // A press is still settling and its label has not flipped. Reading it now is
+            // how two presses 8 ms apart used to undo each other.
+            schedule(after: wait, for: request.serial)
             return
         }
-        guard let label = label(of: button) else {
-            Log.write("teams: mute button has no label")
+        guard let found = currentButton(scanGap: sync.scanGap(at: now)) else {
+            if !reportedMissing {
+                reportedMissing = true
+                Log.write("teams: no mute button found (no call, or Teams not running)")
+            }
             return
         }
-
+        let (button, label) = found
         // The label names the action the button performs, so "unmute mic" means Teams
-        // is currently muted. Only press when Teams disagrees with where we are going.
-        let teamsIsMuted = label.contains("unmute")
-        guard teamsIsMuted != muted else {
-            Log.write("teams: shows \"\(label)\", already \(muted ? "muted" : "live"), not pressed")
-            return
+        // is currently muted.
+        let teamsMuted = label.contains("unmute")
+        switch sync.read(teamsMuted, at: now) {
+        case .settled(let pressed):
+            Log.write(pressed ? "teams: after press shows \"\(label)\""
+                              : "teams: shows \"\(label)\", already \(Self.state(teamsMuted)), not pressed")
+        case .gaveUp(let target):
+            Log.write("teams: ⚠︎ still shows \"\(label)\" after \(TeamsSync.maxPresses) presses, giving up")
+            DispatchQueue.main.async { [weak self] in self?.onGaveUp?(target) }
+        case .press:
+            if request.presses > 0 {
+                Log.write("teams: shows \"\(label)\" ⚠︎ Teams did NOT follow, pressing again")
+            }
+            press(button, label, serial: request.serial)
+        case .nothing, .changed:
+            break
         }
+    }
 
+    private func press(_ button: AXUIElement, _ label: String, serial: Int) {
         let result = AXUIElementPerformAction(button, kAXPressAction as CFString)
-        guard result == .success else {
+        sync.pressed(at: now)
+        if result == .success {
+            Log.write("teams: pressed \"\(label)\"")
+        } else {
             Log.write("teams: press on \"\(label)\" FAILED (AXError \(result.rawValue))")
             cachedButton = nil
+        }
+        // Whether Teams followed is read once the label has had time to flip, and the
+        // button is pressed again if it did not.
+        schedule(after: TeamsSync.settle, for: serial)
+    }
+
+    private func schedule(after delay: TimeInterval, for serial: Int) {
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.sync.request?.serial == serial else { return }
+            self.deliver()
+        }
+    }
+
+    private func tick(_ watch: Int) {
+        guard watch == self.watch, sync.isWatching else { return }
+        defer {
+            queue.asyncAfter(deadline: .now() + Self.watchInterval) { [weak self] in self?.tick(watch) }
+        }
+        // A press waiting to be delivered has the button until it lands or gives up.
+        guard sync.request == nil else { return deliver() }
+        guard sync.wait(at: now) == 0,
+              let found = currentButton(scanGap: sync.scanGap(at: now)) else { return }
+        let label = found.1
+        guard case .changed(let muted, let first) = sync.read(label.contains("unmute"), at: now)
+        else { return }
+        Log.write(first ? "teams: first reading \"\(label)\" -> Teams is \(Self.state(muted))"
+                        : "teams: now shows \"\(label)\", changed inside Teams")
+        let serial = self.serial
+        DispatchQueue.main.async { [weak self] in self?.onChange?(muted, serial, first) }
+    }
+
+    private func attemptCheck(_ delays: ArraySlice<TimeInterval>,
+                              _ completion: @escaping (Reading) -> Void) {
+        guard let delay = delays.first else {
+            Log.write("teams: checked, no mute button to read")
+            DispatchQueue.main.async { completion(.unknown) }
             return
         }
-        Log.write("teams: pressed \"\(label)\"")
-        // The label only flips about 100 ms after the press, so the reading that says
-        // whether Teams actually followed has to wait for it.
-        queue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
-            let after: String = self.label(of: button) ?? "nil"
-            let followed = after.contains("unmute") == muted
-            let warning = followed ? "" : " ⚠︎ Teams did NOT follow"
-            Log.write("teams: after press shows \"\(after)\"\(warning)")
+            if let request = self.sync.request {
+                guard request.presses == 0 else { return }
+                if self.currentButton(scanGap: 0) != nil { return self.deliver() }
+            } else if self.sync.wait(at: self.now) == 0, let found = self.currentButton(scanGap: 0) {
+                let teamsMuted = found.1.contains("unmute")
+                // Kept as the latest reading, so the watch does not report it twice.
+                _ = self.sync.read(teamsMuted, at: self.now)
+                Log.write("teams: checked, shows \"\(found.1)\"")
+                DispatchQueue.main.async { completion(teamsMuted ? .muted : .live) }
+                return
+            }
+            self.attemptCheck(delays.dropFirst(), completion)
         }
     }
 
-    private func resolveButton() -> AXUIElement? {
-        if let cached = cachedButton, label(of: cached) != nil { return cached }
-        cachedButton = nil
-        if Date() < cooldownUntil { return nil }
-
-        let found = scan()
+    /// The button and what it says: from the cached element while it still answers,
+    /// otherwise from a scan, as long as the last scan that came back empty is at least
+    /// `scanGap` old.
+    private func currentButton(scanGap: TimeInterval) -> (AXUIElement, String)? {
+        if let cached = cachedButton {
+            if let text = label(of: cached) { return (cached, text) }
+            cachedButton = nil
+        }
+        guard now - lastFailedScan >= scanGap else { return nil }
+        guard let found = scan(), let text = label(of: found) else {
+            lastFailedScan = now
+            return nil
+        }
         cachedButton = found
-        if let found {
-            let text: String = label(of: found) ?? "nil"
-            Log.write("teams: found mute button \"\(text)\" in pid \(appPID)")
-        }
-        if found == nil { cooldownUntil = Date().addingTimeInterval(3) }
-        return found
+        Log.write("teams: found mute button \"\(text)\" in pid \(appPID)")
+        return (found, text)
     }
+
+    private static func state(_ muted: Bool) -> String { muted ? "muted" : "live" }
 
     private func teamsApp() -> AXUIElement? {
         let running = Self.bundleIDs
@@ -243,11 +339,19 @@ final class TeamsAccessibility {
 
     // MARK: - AX helpers
 
+    /// Title and description, the same text once. Teams gives the button its label as
+    /// both, and read twice it came out "mute mic mute mic", which no strong label
+    /// matches: the button was only ever found by the fallback pass, after every window
+    /// had already been walked once for nothing. The watch scans far more often than
+    /// presses ever did, so that walk is worth not paying.
     private func label(of element: AXUIElement) -> String? {
-        let parts = [string(element, kAXTitleAttribute as String),
-                     string(element, kAXDescriptionAttribute as String)]
-            .compactMap { $0 }
-            .filter { !$0.isEmpty }
+        var parts: [String] = []
+        for attribute in [kAXTitleAttribute as String, kAXDescriptionAttribute as String] {
+            guard let text = string(element, attribute), !text.isEmpty,
+                  !parts.contains(where: { $0.caseInsensitiveCompare(text) == .orderedSame })
+            else { continue }
+            parts.append(text)
+        }
         guard !parts.isEmpty else { return nil }
         return parts.joined(separator: " ").lowercased()
     }

@@ -23,6 +23,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var borrowedFrom: Bool?
     private var releaseToken = 0
 
+    /// Counts the presses Teams has been told about. A reading of Teams taken before the
+    /// latest one is about a state the user has already moved on from, and is dropped.
+    private var teamsSerial = 0
+
+    /// Whether a stretch of capture is under way, and since when. The first seconds of
+    /// a call are Teams deciding how it starts, which is followed without a sound.
+    private var inCall = false
+    private var callBegan = -TimeInterval.infinity
+
+    /// When the mute tone last said that a mute was kept against something opening the
+    /// microphone, so a device that keeps doing it does not turn into a drum roll.
+    private var lastNotice = -TimeInterval.infinity
+
+    /// When a microphone muted from outside was last opened, so something that keeps
+    /// muting it again is left alone rather than fought every half second.
+    private var recentOpens: [TimeInterval] = []
+    private var gaveUpOpening = false
+
     // MARK: - Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -35,21 +53,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         HotKeyManager.shared.onRelease = { [weak self] in self?.shortcutReleased() }
         HotKeyManager.shared.register(shortcut)
 
-        // No polling anywhere: CoreAudio reports capture starting and stopping, and
-        // Teams is only ever asked on the one edge that can have changed its answer.
+        // Nothing is polled while no microphone is open: CoreAudio reports capture
+        // starting and stopping, and the Teams button is only read while it is open.
         audio.onInputActivityChange = { [weak self] in
             guard let self else { return }
-            if self.audio.isInputActive { self.feedback.warmUp() } else { self.scheduleRelease() }
+            if self.audio.isInputActive { self.feedback.warmUp() } else { self.scheduleCallEnd() }
             self.render()
         }
-        audio.onCaptureStarted = { [weak self] in self?.followTeams() }
+        audio.onCaptureStarted = { [weak self] in self?.captureStarted() }
         // The only moment the icon cannot be trusted, so it is the moment to be loud.
         audio.onMuteLost = { [weak self] in self?.warnMuteLost() }
+        audio.onReopenedWhileMuted = { [weak self] in self?.reopenedWhileMuted() }
+        audio.onSilencedWhileLive = { [weak self] in self?.silencedWhileLive() }
+        teamsAX.onChange = { [weak self] teamsMuted, serial, first in
+            self?.teamsChanged(teamsMuted, serial: serial, first: first)
+        }
+        teamsAX.onGaveUp = { [weak self] target in self?.teamsWouldNotFollow(target) }
         installSignalHandlers()
         observeSessionInterruptions()
         render()
         Timing.note("accessibility trusted: \(TeamsAccessibility.isTrusted)")
         requestAccessibilityOnce()
+        // Launched into a call already under way, which nothing will report starting.
+        if audio.isInputActive { captureStarted() }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -149,9 +175,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// The HAL runs first and synchronously, because it is the only layer that decides
-    /// whether the microphone is actually live. Teams is told afterwards and is allowed
-    /// to fail: the worst case is that its window shows the wrong indicator, never that
-    /// the user believes they are muted while still being heard.
+    /// whether the microphone is actually live. Teams is told afterwards, in the
+    /// background, and pressed again until its label shows it followed. It is still
+    /// allowed to fail — an organiser's hard mute will not budge — and then the error
+    /// tone says the two disagree, rather than leaving the user to find out from the
+    /// silence.
     ///
     /// Teams is told on the hold edges too, and has to be: its Mute button is a second,
     /// app-level mute, so a hold that opened the microphone without pressing it would
@@ -169,7 +197,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Log.write("apply -> \(target ? "MUTE" : "UNMUTE")")
         let applied = audio.setMuted(target)
-        teamsAX.setMuted(target)
+        tellTeams(target)
         let t3 = DispatchTime.now().uptimeNanoseconds
         if !applied { Log.write("⚠︎ no device accepted the \(target ? "mute" : "unmute")") }
 
@@ -203,52 +231,172 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Following Teams
 
-    /// Takes Teams' own mute state as the truth, once, when a call starts.
-    ///
-    /// Teams decides that state for itself when it joins — its settings, the meeting's,
-    /// and nothing at all about the mute this app was left holding when the last call
-    /// ended. Whichever of the two is right, they have to agree: while they do not, the
-    /// microphone is either dead behind a Teams that shows you live, or live behind a
-    /// mute you think you still have, and the first press of the shortcut goes to
-    /// moving the half that was already correct.
-    ///
-    /// Teams is believed here and only here. It is the side other participants can see,
-    /// and a call starting is the one moment where nothing the user did with the
-    /// shortcut is being overruled — any press cancels a read still in flight.
-    private func followTeams() {
+    /// Tells Teams where the user just sent the microphone. Every reading of Teams taken
+    /// before this carries an older number, and is dropped when it arrives.
+    private func tellTeams(_ muted: Bool) {
+        teamsSerial += 1
+        teamsAX.setMuted(muted, serial: teamsSerial)
+    }
+
+    /// Something opened a microphone, which is what a call starting looks like from
+    /// here. Teams is watched from now until nothing has captured for a moment.
+    private func captureStarted() {
         releaseToken += 1   // a call starting settles nothing that was owed to the last one
-        teamsAX.readMuted { [weak self] teamsMuted in
-            guard let self, teamsMuted != self.audio.isMuted else { return }
-            Timing.note("call started with Teams \(teamsMuted ? "muted" : "live"), following it")
-            // What the microphone was doing before the call is kept, because this state
-            // is on loan from Teams and has to be given back when the call ends.
-            if self.borrowedFrom == nil { self.borrowedFrom = self.audio.isMuted }
-            // Teams is already where it says it is, so it is not told anything back.
-            self.audio.setMuted(teamsMuted)
-            self.render()
-            self.audio.logSnapshot("after following Teams", after: 0.5)
+        guard !inCall else { return }
+        inCall = true
+        callBegan = ProcessInfo.processInfo.systemUptime
+        teamsAX.startWatching()
+    }
+
+    /// Teams showed something it was not asked to: the first reading of a call, or a
+    /// mute changed inside Teams itself.
+    private func teamsChanged(_ teamsMuted: Bool, serial: Int, first: Bool) {
+        // Read before the latest press, so about a state the user has moved on from.
+        guard serial == teamsSerial else { return }
+        let state = teamsMuted ? "muted" : "live"
+        follow(teamsMuted, first ? "call started with Teams \(state)" : "Teams went \(state) inside Teams")
+    }
+
+    /// Moves the microphone to where Teams is, which is the side other participants see.
+    ///
+    /// Teams used to be believed once per call, when it started, and pushed at
+    /// everywhere else, so a mute changed inside Teams left the two apart for the rest
+    /// of the call — and the half the user watches during a call is Teams. The log has
+    /// it plainly: twice inside two seconds something took the mute off the microphone
+    /// in use, the app put it straight back both times, and ten seconds later the
+    /// shortcut found Teams had been showing "live" all along.
+    ///
+    /// Whatever Teams lends lasts for the call, the same as the state a call starts
+    /// with: Teams' own mute ends when the call does and a HAL mute does not, so it is
+    /// handed back when the call is over. A press of the shortcut takes ownership, as
+    /// it always has.
+    private func follow(_ teamsMuted: Bool, _ reason: String) {
+        // A key held down is the user steering the microphone this very moment.
+        guard !hold.isHolding else { return }
+        guard teamsMuted != audio.isMuted else {
+            // Both say live, so the microphone the call is using had better be live too.
+            if !teamsMuted { openSilenced() }
+            return
+        }
+        Timing.note("\(reason), following it")
+        if borrowedFrom == nil { borrowedFrom = audio.isMuted }
+        // The first seconds of a call are Teams deciding how it starts, followed quietly
+        // as they always were. After that it is someone acting inside Teams, and the
+        // microphone moving sounds the way the shortcut would make it sound.
+        let audible = ProcessInfo.processInfo.systemUptime - callBegan > 3
+        if audible && !teamsMuted { feedback.play(.unmute) }
+        // Teams is already where it says it is, so it is not told anything back.
+        audio.setMuted(teamsMuted)
+        if audible && teamsMuted { feedback.play(.mute) }
+        render()
+        audio.logSnapshot("after following Teams", after: 0.5)
+    }
+
+    /// A microphone in use lost the mute we put on it, and the mute is already back on.
+    ///
+    /// Most often that was Teams: it writes its own mute into the device, so unmuting
+    /// inside Teams takes ours off, and putting it back without asking left Teams
+    /// showing you live over a dead microphone — the report this whole section answers.
+    /// So Teams is asked. Live means that was you, and the microphone follows. Muted
+    /// means Teams agrees with the mute that went back, which is what a driver resetting
+    /// as a call opens looks like. No answer — no Teams, no Accessibility, another app
+    /// entirely — keeps the mute, because the app says muted, but says so out loud.
+    ///
+    /// The mute goes back before the question is asked, so the microphone is never open
+    /// while the answer is on its way. Unmuting inside Teams costs a quarter of a second
+    /// of speech for it.
+    ///
+    /// A call that is still joining gets longer to answer. Teams writes the device as it
+    /// joins, which makes that the commonest moment of all for this, and its toolbar is
+    /// often not on screen yet — five seconds after capture began, in one log. Asked too
+    /// early, every such call would play the tone for a mute Teams agrees with.
+    private func reopenedWhileMuted() {
+        let serial = teamsSerial
+        // Two statements, not a ternary: two array literals either side of `?:` took the
+        // type checker over twelve minutes.
+        var delays: [TimeInterval] = [0.25, 0.5, 1.0]
+        if ProcessInfo.processInfo.systemUptime - callBegan < 10 { delays += [1.5, 1.5, 1.5, 2.0] }
+        teamsAX.check(after: delays) { [weak self] reading in
+            guard let self, serial == self.teamsSerial, self.audio.isMuted else { return }
+            switch reading {
+            case .live: self.follow(false, "microphone opened from outside while Teams shows live")
+            case .muted: break
+            case .unknown: self.noticeMuteKept()
+            }
         }
     }
 
-    /// Gives back the state the call borrowed, once the call is over.
+    /// Whatever opened the microphone was most likely the user, unmuting somewhere this
+    /// app cannot read, and they are still not being heard. The mute tone says so.
+    private func noticeMuteKept() {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastNotice > 5 else { return }
+        lastNotice = now
+        Timing.note("microphone opened from outside and muted again, no Teams to ask, telling the user")
+        feedback.play(.mute)
+    }
+
+    /// A microphone in use went quiet while the app says live: muted from inside Teams,
+    /// which writes that into the device as well, or left muted by something else on
+    /// the device a call has just moved to. Teams says which.
+    private func silencedWhileLive() {
+        let serial = teamsSerial
+        teamsAX.check(after: [0.6, 1]) { [weak self] reading in
+            guard let self, serial == self.teamsSerial, !self.audio.isMuted else { return }
+            switch reading {
+            case .muted: self.follow(true, "microphone muted from outside while Teams shows muted")
+            case .live: self.openSilenced()
+            case .unknown: break
+            }
+        }
+    }
+
+    private func openSilenced() {
+        let now = ProcessInfo.processInfo.systemUptime
+        recentOpens = recentOpens.filter { now - $0 < 30 }
+        guard recentOpens.count < 3 else {
+            if !gaveUpOpening { Timing.note("something keeps muting the microphone in use, leaving it be") }
+            gaveUpOpening = true
+            return
+        }
+        gaveUpOpening = false
+        guard !audio.openCapturingDevices().isEmpty else { return }
+        recentOpens.append(now)
+        render()
+        audio.logSnapshot("after opening a microphone muted from outside", after: 0.5)
+    }
+
+    /// Teams ignored the button however often it was pressed — an organiser's hard mute
+    /// does exactly that. The microphone did what was asked and Teams shows otherwise,
+    /// and only the user can say which of the two they meant.
+    private func teamsWouldNotFollow(_ target: Bool) {
+        Timing.note("Teams would not \(target ? "mute" : "unmute"), it no longer matches the microphone")
+        feedback.play(.error)
+    }
+
+    /// Ends the call once nothing has captured for a moment: Teams stops being watched,
+    /// and the state the call borrowed is given back.
     ///
-    /// Teams' own mute ends with the call; a HAL mute does not. Adopting one at the
-    /// start of a call and then keeping it leaves the microphone dead for every other
-    /// app afterwards, with nothing left in Teams to explain the red icon — a mute
-    /// nobody chose and only this app knows how to undo.
+    /// Teams' own mute ends with the call; a HAL mute does not. Adopting one during a
+    /// call and then keeping it leaves the microphone dead for every other app
+    /// afterwards, with nothing left in Teams to explain the red icon — a mute nobody
+    /// chose and only this app knows how to undo.
     ///
     /// Only ever a state the user did not choose: a press of the shortcut, in either
     /// direction, hands ownership to them and there is nothing left here to give back.
-    private func scheduleRelease() {
-        guard borrowedFrom != nil else { return }
+    private func scheduleCallEnd() {
         releaseToken += 1
         let token = releaseToken
         // Capture stopping is not proof a meeting ended. Teams stops one device and
         // starts another when it switches, and for a moment in between nothing is
-        // capturing at all; releasing on that would open the microphone mid-call.
+        // capturing at all; ending the call on that would open the microphone mid-call.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            guard let self, token == self.releaseToken else { return }
-            guard !self.audio.isInputActive, let previous = self.borrowedFrom else { return }
+            guard let self, token == self.releaseToken, !self.audio.isInputActive else { return }
+            if self.inCall {
+                self.inCall = false
+                self.teamsAX.stopWatching()
+            }
+            guard let previous = self.borrowedFrom else { return }
             self.borrowedFrom = nil
             guard previous != self.audio.isMuted else { return }
             Timing.note("call over, giving the microphone back to \(previous ? "muted" : "live")")
@@ -440,7 +588,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hold.cancel()
         stopHoldWatchdog()
         audio.forceUnmuteEverything()
-        teamsAX.setMuted(false)
+        tellTeams(false)
         render()
     }
 
