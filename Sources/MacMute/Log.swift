@@ -22,6 +22,9 @@ enum Log {
     private static let queue = DispatchQueue(label: "com.tuanbt.macmute.log", qos: .utility)
     private static var handle: FileHandle?
     private static var size: UInt64 = 0
+    /// Which file the handle is writing to, so a handle that has been parted from the
+    /// path can be told apart from one still writing where the settings panel points.
+    private static var inode: ino_t = 0
 
     private static let clock: DateFormatter = {
         let formatter = DateFormatter()
@@ -47,14 +50,26 @@ enum Log {
     // MARK: - Queue confined
 
     private static func append(_ data: Data) {
-        if handle == nil { open() }
+        // A handle follows its file wherever it is moved. Dragging the log to the Trash
+        // from the Finder window "Show Log in Finder" opens did not stop the logging, it
+        // sent every line after it into the Trash, and the folder stayed empty for the
+        // rest of the session — two and a half days of it, the first time it happened.
+        if handle == nil || !stillAtPath() { open() }
         if size + UInt64(data.count) > limit { rotate() }
         guard let handle else { return }
         handle.write(data)
         size += UInt64(data.count)
     }
 
+    /// One `stat` per line, on this queue and not the caller's.
+    private static func stillAtPath() -> Bool {
+        var info = stat()
+        return stat(file.path, &info) == 0 && info.st_ino == inode
+    }
+
     private static func open() {
+        try? handle?.close()
+        handle = nil
         let manager = FileManager.default
         try? manager.createDirectory(at: directory, withIntermediateDirectories: true)
         if !manager.fileExists(atPath: file.path) {
@@ -62,11 +77,11 @@ enum Log {
         }
         handle = try? FileHandle(forWritingTo: file)
         size = (try? handle?.seekToEnd()) ?? 0
+        var info = stat()
+        if let handle, fstat(handle.fileDescriptor, &info) == 0 { inode = info.st_ino } else { inode = 0 }
     }
 
     private static func rotate() {
-        try? handle?.close()
-        handle = nil
         let manager = FileManager.default
         try? manager.removeItem(at: previous)
         try? manager.moveItem(at: file, to: previous)
