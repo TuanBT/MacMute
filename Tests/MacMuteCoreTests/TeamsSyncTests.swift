@@ -87,6 +87,91 @@ final class TeamsSyncTests: XCTestCase {
         XCTAssertEqual(sync.read(false, at: 10.6 + settle), .settled(pressed: true))
     }
 
+    // MARK: - Teams following the microphone by itself
+
+    /// The K30 call: Teams matched the device mute before the press arrived, and the
+    /// press toggled it back. Seen once, the next keypress leaves Teams to it.
+    func testFirstPressUndoneMeansTeamsFollowsTheDevice() {
+        var sync = TeamsSync()
+        sync.begin(at: 0)
+        _ = sync.read(false, at: 0.4)
+
+        sync.ask(true, serial: 1, at: 10)
+        XCTAssertEqual(sync.read(false, at: 10), .press)
+        sync.pressed(at: 10)
+        XCTAssertFalse(sync.followsDevice)
+        XCTAssertEqual(sync.read(false, at: 10 + settle), .press, "back where it started")
+        XCTAssertTrue(sync.followsDevice)
+        sync.pressed(at: 10.5)
+        XCTAssertEqual(sync.read(true, at: 10.5 + settle), .settled(pressed: true))
+
+        sync.ask(false, serial: 2, at: 20)
+        XCTAssertGreaterThan(sync.wait(at: 20), 0)
+        XCTAssertEqual(sync.read(true, at: 20), .nothing,
+                       "pressing now is the toggle that undoes Teams following the device")
+        XCTAssertEqual(sync.read(true, at: 20.2), .nothing)
+        XCTAssertEqual(sync.read(false, at: 20 + settle), .settled(pressed: false))
+        XCTAssertTrue(sync.followsDevice, "it did it again, so it is still left to")
+    }
+
+    /// The same device, minutes later in the same call, stopped doing it. Waiting once
+    /// costs half a second of the Teams indicator; waiting every time would cost it on
+    /// every keypress.
+    func testTeamsThatStopsFollowingTheDeviceIsPressedAgain() {
+        var sync = TeamsSync()
+        sync.begin(at: 0)
+        sync.ask(true, serial: 1, at: 10)
+        _ = sync.read(false, at: 10)
+        sync.pressed(at: 10)
+        _ = sync.read(false, at: 10 + settle)
+        XCTAssertTrue(sync.followsDevice)
+        sync.pressed(at: 10.5)
+        _ = sync.read(true, at: 10.5 + settle)
+
+        sync.ask(false, serial: 2, at: 20)
+        XCTAssertEqual(sync.read(true, at: 20 + settle), .press)
+        XCTAssertFalse(sync.followsDevice)
+        sync.pressed(at: 20.5)
+        XCTAssertEqual(sync.read(false, at: 20.5 + settle), .settled(pressed: true))
+
+        sync.ask(true, serial: 3, at: 30)
+        XCTAssertEqual(sync.wait(at: 30), 0)
+        XCTAssertEqual(sync.read(false, at: 30), .press, "straight away, as before")
+    }
+
+    /// Several keypresses inside the wait are one request: Teams is read once the last
+    /// of them has had time to reach it.
+    func testWaitingForTeamsRestartsWithEveryPress() {
+        var sync = TeamsSync()
+        sync.begin(at: 0)
+        sync.ask(true, serial: 1, at: 10)
+        _ = sync.read(false, at: 10)
+        sync.pressed(at: 10)
+        _ = sync.read(false, at: 10 + settle)
+        sync.pressed(at: 10.5)
+        _ = sync.read(true, at: 10.5 + settle)
+
+        sync.ask(false, serial: 2, at: 20)
+        sync.ask(true, serial: 3, at: 20.3)
+        XCTAssertEqual(sync.read(true, at: 20 + settle), .nothing)
+        XCTAssertEqual(sync.read(true, at: 20.3 + settle), .settled(pressed: false))
+    }
+
+    func testANewCallForgetsThatTeamsFollowedTheDevice() {
+        var sync = TeamsSync()
+        sync.begin(at: 0)
+        sync.ask(true, serial: 1, at: 10)
+        _ = sync.read(false, at: 10)
+        sync.pressed(at: 10)
+        _ = sync.read(false, at: 10 + settle)
+        XCTAssertTrue(sync.followsDevice)
+        sync.end()
+        sync.begin(at: 100)
+        XCTAssertFalse(sync.followsDevice)
+        sync.ask(false, serial: 2, at: 101)
+        XCTAssertEqual(sync.read(true, at: 101), .press)
+    }
+
     /// A press waiting on a button that is not on screen yet is never read as Teams
     /// changing its mind once the button turns up.
     func testPressWaitingOnTheButtonIsDeliveredWhenItAppears() {

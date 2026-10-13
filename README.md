@@ -53,7 +53,9 @@ Accessibility API is the remaining way to keep that indicator in sync.
 - **Mutes every microphone** — not just the system default, because apps like Teams can pick
   a different input device
 - **Teams mute indicator sync** — presses the real Mute button inside the Teams window,
-  and presses it again if Teams does not follow (requires Accessibility permission)
+  and presses it again if Teams does not follow. With some USB microphones Teams matches
+  the device's mute by itself, and then it is left to do so rather than pressed into
+  flickering back (requires Accessibility permission)
 - **Follows Teams, both ways** — a call joins with its own mute state, decided by Teams and
   knowing nothing about the mute left over from the last one, so MacMute reads the Teams
   button when a call starts and matches the microphone to it. It keeps reading it for as
@@ -215,6 +217,9 @@ that Teams listens to moves MacMute's mute too, with the same tone the shortcut 
 What it borrowed from Teams is given back when the call ends. The other direction works
 as before: the shortcut presses the Teams button, and presses it again if Teams does not
 follow. If Teams still refuses — an organiser's hard mute does — you hear the error tone.
+Some USB microphones need no press at all: Teams matches its mute to the device's on its
+own, and a press on top of that toggles it straight back. Once MacMute sees that in a
+call, it gives Teams half a second to follow by itself and only presses if it did not.
 
 ### What if something unmutes my microphone behind MacMute's back?
 

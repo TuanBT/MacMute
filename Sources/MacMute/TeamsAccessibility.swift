@@ -159,16 +159,29 @@ final class TeamsAccessibility {
         // The label names the action the button performs, so "unmute mic" means Teams
         // is currently muted.
         let teamsMuted = label.contains("unmute")
-        switch sync.read(teamsMuted, at: now) {
+        let waited = sync.followsDevice
+        let step = sync.read(teamsMuted, at: now)
+        if sync.followsDevice && !waited {
+            Log.write("teams: Teams follows the microphone's own mute this call, "
+                      + "waiting for it before pressing from now on")
+        }
+        switch step {
         case .settled(let pressed):
-            Log.write(pressed ? "teams: after press shows \"\(label)\""
-                              : "teams: shows \"\(label)\", already \(Self.state(teamsMuted)), not pressed")
+            if pressed {
+                Log.write("teams: after press shows \"\(label)\"")
+            } else if waited {
+                Log.write("teams: shows \"\(label)\", followed the microphone by itself, not pressed")
+            } else {
+                Log.write("teams: shows \"\(label)\", already \(Self.state(teamsMuted)), not pressed")
+            }
         case .gaveUp(let target):
             Log.write("teams: ⚠︎ still shows \"\(label)\" after \(TeamsSync.maxPresses) presses, giving up")
             DispatchQueue.main.async { [weak self] in self?.onGaveUp?(target) }
         case .press:
             if request.presses > 0 {
                 Log.write("teams: shows \"\(label)\" ⚠︎ Teams did NOT follow, pressing again")
+            } else if waited {
+                Log.write("teams: shows \"\(label)\", did not follow the microphone this time, pressing")
             }
             press(button, label, serial: request.serial)
         case .nothing, .changed:

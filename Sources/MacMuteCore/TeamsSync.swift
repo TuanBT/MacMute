@@ -22,6 +22,15 @@ import Foundation
 /// Telling the first two apart is the whole job: following a press that had not landed
 /// yet is how the app would undo the user's own shortcut.
 ///
+/// Sometimes Teams does not need pressing at all. With some USB microphones — the K30,
+/// once it was plugged in mid-call — Teams moves its own mute to match the device's,
+/// within milliseconds of the app writing it. The press that lands right after is then
+/// a second toggle that takes Teams straight back, and the press again half a second
+/// later toggles it a third time: mute, unmute, mute, on one keypress, about twenty
+/// times in half an hour. A first press read back undone is that, so for the rest of
+/// the call Teams is given the settle time to follow the microphone by itself, and only
+/// pressed when it has not.
+///
 /// Free of the Accessibility API, the way `HoldGesture` is free of Carbon, because
 /// every case worth testing here is a timing case.
 public struct TeamsSync {
@@ -62,6 +71,9 @@ public struct TeamsSync {
     /// What Teams showed at the last reading this call; nil until the first.
     public private(set) var seen: Bool?
     public private(set) var isWatching = false
+    /// Teams has been seen matching its mute to the microphone's on its own this call,
+    /// so a request waits for that before it presses anything.
+    public private(set) var followsDevice = false
     private var began: TimeInterval = 0
     private var lastPress: TimeInterval?
 
@@ -70,12 +82,16 @@ public struct TeamsSync {
     /// Something opened a microphone, which is what a call starting looks like from
     /// here. A press made before it is not carried in: how a call starts is Teams' to
     /// decide, and a press from before the meeting said nothing about it.
+    ///
+    /// Whether Teams follows the device is not carried in either. The same K30 that
+    /// had it in one call did not in the call before, through 130 presses.
     public mutating func begin(at now: TimeInterval) {
         guard !isWatching else { return }
         isWatching = true
         began = now
         seen = nil
         request = nil
+        followsDevice = false
     }
 
     /// Nothing has had a microphone open for a while: the call is over.
@@ -83,6 +99,7 @@ public struct TeamsSync {
         isWatching = false
         seen = nil
         request = nil
+        followsDevice = false
     }
 
     /// The user asked for `target` — the shortcut, the menu, either edge of a hold.
@@ -91,10 +108,14 @@ public struct TeamsSync {
         request = Request(target: target, serial: serial, made: now)
     }
 
-    /// How long until the label is worth reading.
+    /// How long until the label is worth reading: a press of ours settling, or Teams
+    /// following the microphone by itself, when it does that.
     public func wait(at now: TimeInterval) -> TimeInterval {
-        guard let lastPress else { return 0 }
-        return max(0, Self.settle - (now - lastPress))
+        var until = lastPress.map { $0 + Self.settle } ?? 0
+        if followsDevice, let request, request.presses == 0 {
+            until = max(until, request.made + Self.settle)
+        }
+        return max(0, until - now)
     }
 
     /// One reading of the button, true when it says Teams is muted.
@@ -111,6 +132,11 @@ public struct TeamsSync {
                 self.request = nil
                 return .gaveUp(target: request.target)
             }
+            // A first press read back undone: Teams had already followed the device,
+            // and the press took it back. Waited for and still not there: this time it
+            // did not, so the next request is pressed straight away again.
+            if request.presses == 1 { followsDevice = true }
+            if request.presses == 0 { followsDevice = false }
             return .press
         }
         let first = seen == nil
