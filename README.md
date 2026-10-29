@@ -216,7 +216,10 @@ twice a second, so clicking it, using Teams' own shortcut or pressing a headset 
 that Teams listens to moves MacMute's mute too, with the same tone the shortcut plays.
 What it borrowed from Teams is given back when the call ends. The other direction works
 as before: the shortcut presses the Teams button, and presses it again if Teams does not
-follow. If Teams still refuses — an organiser's hard mute does — you hear the error tone.
+follow. Behind another app — a full-screen remote desktop, say — Teams can show a press
+over a second late, so there it gets two seconds before it is pressed again; any sooner, and the
+second press undid the first, sending a mute straight back to live. If Teams still
+refuses — an organiser's hard mute does — you hear the error tone.
 Some USB microphones need no press at all: Teams matches its mute to the device's on its
 own, and a press on top of that toggles it straight back. Once MacMute sees that in a
 call, it gives Teams half a second to follow by itself and only presses if it did not.

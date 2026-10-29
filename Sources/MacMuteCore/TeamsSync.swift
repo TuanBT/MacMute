@@ -42,6 +42,9 @@ public struct TeamsSync {
         /// Which press asked, so a reading taken before a newer one can be told apart.
         public let serial: Int
         public let made: TimeInterval
+        /// How long Teams is given to follow the microphone by itself, when it does that.
+        /// Behind another app it shows that as late as it shows a press.
+        public let settle: TimeInterval
         public internal(set) var presses = 0
     }
 
@@ -65,6 +68,14 @@ public struct TeamsSync {
     /// the first, as a remapped mouse button sends them, used to read "already there",
     /// skip the button, and leave Teams the opposite of the microphone.
     public static let settle: TimeInterval = 0.5
+
+    /// The same, for a Teams behind another app. Behind a full-screen Omnissa desktop the
+    /// label showed a press up to 1.2 seconds after it, so the read half a second in
+    /// still found the old one, and the press again landed on a press that had worked:
+    /// a mute taken straight back to live, and Teams writing that into the microphone.
+    /// That happened on 9 of the 11 keypresses made with Omnissa in front one morning.
+    /// With Teams in front, one of 122 needed a second press, during a change of microphone.
+    public static let backgroundSettle: TimeInterval = 2
     public static let maxPresses = 3
 
     public private(set) var request: Request?
@@ -76,6 +87,8 @@ public struct TeamsSync {
     public private(set) var followsDevice = false
     private var began: TimeInterval = 0
     private var lastPress: TimeInterval?
+    /// How long the last press is given to show, decided when it was made.
+    private var lastSettle = TeamsSync.settle
 
     public init() {}
 
@@ -103,17 +116,20 @@ public struct TeamsSync {
     }
 
     /// The user asked for `target` — the shortcut, the menu, either edge of a hold.
-    /// Replaces whatever was asked before, landed or not.
-    public mutating func ask(_ target: Bool, serial: Int, at now: TimeInterval) {
-        request = Request(target: target, serial: serial, made: now)
+    /// Replaces whatever was asked before, landed or not. `inBackground` is whether
+    /// Teams is behind another app as it is asked.
+    public mutating func ask(_ target: Bool, serial: Int, at now: TimeInterval,
+                             inBackground: Bool = false) {
+        request = Request(target: target, serial: serial, made: now,
+                          settle: inBackground ? Self.backgroundSettle : Self.settle)
     }
 
     /// How long until the label is worth reading: a press of ours settling, or Teams
     /// following the microphone by itself, when it does that.
     public func wait(at now: TimeInterval) -> TimeInterval {
-        var until = lastPress.map { $0 + Self.settle } ?? 0
+        var until = lastPress.map { $0 + lastSettle } ?? 0
         if followsDevice, let request, request.presses == 0 {
-            until = max(until, request.made + Self.settle)
+            until = max(until, request.made + request.settle)
         }
         return max(0, until - now)
     }
@@ -146,9 +162,11 @@ public struct TeamsSync {
     }
 
     /// The button was pressed. A press that failed counts the same, so a button that
-    /// keeps refusing is not retried forever.
-    public mutating func pressed(at now: TimeInterval) {
+    /// keeps refusing is not retried forever. `inBackground` is whether Teams was behind
+    /// another app at the press, and so how long the press is given to show.
+    public mutating func pressed(at now: TimeInterval, inBackground: Bool = false) {
         lastPress = now
+        lastSettle = inBackground ? Self.backgroundSettle : Self.settle
         request?.presses += 1
     }
 

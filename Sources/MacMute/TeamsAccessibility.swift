@@ -87,7 +87,7 @@ final class TeamsAccessibility {
         queue.async { [weak self] in
             guard let self else { return }
             self.serial = serial
-            self.sync.ask(muted, serial: serial, at: self.now)
+            self.sync.ask(muted, serial: serial, at: self.now, inBackground: self.inBackground)
             self.reportedMissing = false
             self.deliver()
         }
@@ -191,16 +191,18 @@ final class TeamsAccessibility {
 
     private func press(_ button: AXUIElement, _ label: String, serial: Int) {
         let result = AXUIElementPerformAction(button, kAXPressAction as CFString)
-        sync.pressed(at: now)
+        let background = inBackground
+        let pressedAt = now
+        sync.pressed(at: pressedAt, inBackground: background)
         if result == .success {
-            Log.write("teams: pressed \"\(label)\"")
+            Log.write("teams: pressed \"\(label)\"" + (background ? " with Teams in the background" : ""))
         } else {
             Log.write("teams: press on \"\(label)\" FAILED (AXError \(result.rawValue))")
             cachedButton = nil
         }
         // Whether Teams followed is read once the label has had time to flip, and the
         // button is pressed again if it did not.
-        schedule(after: TeamsSync.settle, for: serial)
+        schedule(after: sync.wait(at: pressedAt), for: serial)
     }
 
     private func schedule(after delay: TimeInterval, for serial: Int) {
@@ -271,6 +273,14 @@ final class TeamsAccessibility {
     }
 
     private static func state(_ muted: Bool) -> String { muted ? "muted" : "live" }
+
+    /// Whether Teams is behind another app, where it shows a press late. Being the app
+    /// in front stands in for its meeting window being on screen, so a Teams in plain
+    /// view next to the app in front is only given longer than it needs.
+    private var inBackground: Bool {
+        let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+        return !Self.bundleIDs.contains(front)
+    }
 
     private func teamsApp() -> AXUIElement? {
         let running = Self.bundleIDs

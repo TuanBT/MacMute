@@ -87,6 +87,89 @@ final class TeamsSyncTests: XCTestCase {
         XCTAssertEqual(sync.read(false, at: 10.6 + settle), .settled(pressed: true))
     }
 
+    // MARK: - Teams behind another app
+
+    /// The Omnissa morning: behind a full-screen remote desktop the label turned up as
+    /// much as 1.2 s after the press. Read at half a second, a press that had worked
+    /// looked like one that had not, and pressing again took Teams straight back.
+    func testPressWithTeamsInTheBackgroundIsGivenLongerToShow() {
+        var sync = TeamsSync()
+        sync.begin(at: 0)
+        _ = sync.read(false, at: 0.4)
+
+        sync.ask(true, serial: 1, at: 10, inBackground: true)
+        XCTAssertEqual(sync.read(false, at: 10), .press)
+        sync.pressed(at: 10, inBackground: true)
+        XCTAssertEqual(sync.wait(at: 10), TeamsSync.backgroundSettle)
+        XCTAssertEqual(sync.read(false, at: 10 + settle), .nothing,
+                       "not shown yet is not the same as not landed")
+        XCTAssertEqual(sync.read(true, at: 11.2), .nothing)
+        XCTAssertEqual(sync.read(true, at: 10 + TeamsSync.backgroundSettle), .settled(pressed: true))
+        XCTAssertFalse(sync.followsDevice, "a late label is not Teams following the microphone")
+    }
+
+    /// Only the wait grows: a press that really did not land is still pressed again.
+    func testPressInTheBackgroundThatDoesNotLandIsStillPressedAgain() {
+        var sync = TeamsSync()
+        sync.begin(at: 0)
+        sync.ask(false, serial: 1, at: 1, inBackground: true)
+        XCTAssertEqual(sync.read(true, at: 1), .press)
+        sync.pressed(at: 1, inBackground: true)
+        XCTAssertEqual(sync.read(true, at: 1 + TeamsSync.backgroundSettle), .press)
+    }
+
+    /// Two keypresses under a second apart behind Omnissa. The second is decided on what
+    /// the first did, once that has had time to show, not on the label from before both.
+    func testNewerPressWaitsForABackgroundPressToShow() {
+        var sync = TeamsSync()
+        sync.begin(at: 0)
+        _ = sync.read(true, at: 0.4)
+
+        sync.ask(false, serial: 1, at: 10, inBackground: true)
+        _ = sync.read(true, at: 10)
+        sync.pressed(at: 10, inBackground: true)
+        sync.ask(true, serial: 2, at: 10.8, inBackground: true)
+        XCTAssertEqual(sync.read(true, at: 10.8), .nothing,
+                       "the old label would say Teams is already muted, and leave it live")
+        XCTAssertEqual(sync.read(false, at: 11.1), .nothing)
+        XCTAssertEqual(sync.read(false, at: 10 + TeamsSync.backgroundSettle), .press,
+                       "the newer press is delivered against what the first one did")
+    }
+
+    /// Back in front, Teams answers in a tenth of a second again, and is read at the
+    /// usual pace.
+    func testPressWithTeamsInFrontKeepsTheShortSettle() {
+        var sync = TeamsSync()
+        sync.begin(at: 0)
+        sync.ask(true, serial: 1, at: 10, inBackground: true)
+        _ = sync.read(false, at: 10)
+        sync.pressed(at: 10, inBackground: true)
+        _ = sync.read(true, at: 10 + TeamsSync.backgroundSettle)
+
+        sync.ask(false, serial: 2, at: 20)
+        XCTAssertEqual(sync.read(true, at: 20), .press)
+        sync.pressed(at: 20)
+        XCTAssertEqual(sync.wait(at: 20), settle)
+        XCTAssertEqual(sync.read(false, at: 20 + settle), .settled(pressed: true))
+    }
+
+    /// Teams following the microphone by itself shows as late as a press does.
+    func testWaitingForTeamsToFollowTheDeviceIsLongerInTheBackground() {
+        var sync = TeamsSync()
+        sync.begin(at: 0)
+        sync.ask(true, serial: 1, at: 10)
+        _ = sync.read(false, at: 10)
+        sync.pressed(at: 10)
+        _ = sync.read(false, at: 10 + settle)
+        XCTAssertTrue(sync.followsDevice)
+        sync.pressed(at: 10.5)
+        _ = sync.read(true, at: 10.5 + settle)
+
+        sync.ask(false, serial: 2, at: 20, inBackground: true)
+        XCTAssertEqual(sync.read(true, at: 20 + settle), .nothing)
+        XCTAssertEqual(sync.read(false, at: 20 + TeamsSync.backgroundSettle), .settled(pressed: false))
+    }
+
     // MARK: - Teams following the microphone by itself
 
     /// The K30 call: Teams matched the device mute before the press arrived, and the
