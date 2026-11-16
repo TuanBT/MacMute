@@ -67,8 +67,10 @@ final class TeamsSyncTests: XCTestCase {
 
     /// A remapped mouse button sends the shortcut twice, 8 ms apart. The second press
     /// used to read the label before the first had flipped it, find Teams "already"
-    /// where it was going, and leave it the opposite of the microphone.
-    func testSecondPressInsideTheSettleWindowWaitsForTheFirst() {
+    /// where it was going, and leave it the opposite of the microphone. It is not read
+    /// at all now: the first press is known to be taking Teams to muted, so the second,
+    /// which wants it live, is one more press.
+    func testSecondPressInsideTheSettleWindowReversesTheFirst() {
         var sync = TeamsSync()
         sync.begin(at: 0)
         _ = sync.read(false, at: 0.4)
@@ -77,14 +79,46 @@ final class TeamsSyncTests: XCTestCase {
         XCTAssertEqual(sync.read(false, at: 10), .press)
         sync.pressed(at: 10.001)
         sync.ask(false, serial: 2, at: 10.008)
-        XCTAssertGreaterThan(sync.wait(at: 10.009), 0)
-        XCTAssertEqual(sync.read(false, at: 10.009), .nothing, "stale: the first press has not shown yet")
+        XCTAssertEqual(sync.wait(at: 10.009), 0)
+        XCTAssertEqual(sync.read(false, at: 10.009), .press,
+                       "the label still says live, which is the state before the first press")
+        sync.pressed(at: 10.009)
 
-        // The first press has landed by now, so Teams is muted and the newer press
-        // wants it live.
-        XCTAssertEqual(sync.read(true, at: 10.001 + settle), .press)
-        sync.pressed(at: 10.6)
-        XCTAssertEqual(sync.read(false, at: 10.6 + settle), .settled(pressed: true))
+        // Both presses have had their time, and Teams is where the newer one sent it.
+        XCTAssertEqual(sync.read(false, at: 10.009 + settle), .settled(pressed: true))
+    }
+
+    /// A newer press for what the last one is already bringing about has nothing to
+    /// press: it waits for the label like any other.
+    func testSecondPressForTheSameStateWaitsForTheFirst() {
+        var sync = TeamsSync()
+        sync.begin(at: 0)
+        _ = sync.read(false, at: 0.4)
+
+        sync.ask(true, serial: 1, at: 10)
+        XCTAssertEqual(sync.read(false, at: 10), .press)
+        sync.pressed(at: 10)
+        sync.ask(true, serial: 2, at: 10.2)
+        XCTAssertGreaterThan(sync.wait(at: 10.2), 0)
+        XCTAssertEqual(sync.read(false, at: 10.2), .nothing, "stale: the first press has not shown yet")
+        XCTAssertEqual(sync.read(true, at: 10 + settle), .settled(pressed: false))
+    }
+
+    /// A press that never reached the button moved nothing, so the next request is not
+    /// built on it.
+    func testPressThatFailedLeavesNothingToReverse() {
+        var sync = TeamsSync()
+        sync.begin(at: 0)
+        _ = sync.read(false, at: 0.4)
+
+        sync.ask(true, serial: 1, at: 10)
+        XCTAssertEqual(sync.read(false, at: 10), .press)
+        sync.pressed(at: 10, landed: false)
+        XCTAssertNil(sync.inFlight(at: 10.1))
+        sync.ask(false, serial: 2, at: 10.2)
+        XCTAssertGreaterThan(sync.wait(at: 10.2), 0)
+        XCTAssertEqual(sync.read(false, at: 10 + settle), .settled(pressed: false),
+                       "Teams never moved, and is already where it was asked to be")
     }
 
     // MARK: - Teams behind another app
@@ -119,8 +153,8 @@ final class TeamsSyncTests: XCTestCase {
     }
 
     /// Two keypresses under a second apart behind Omnissa. The second is decided on what
-    /// the first did, once that has had time to show, not on the label from before both.
-    func testNewerPressWaitsForABackgroundPressToShow() {
+    /// the first did, not on the label from before both.
+    func testNewerPressIsDecidedOnWhatABackgroundPressDid() {
         var sync = TeamsSync()
         sync.begin(at: 0)
         _ = sync.read(true, at: 0.4)
@@ -129,11 +163,54 @@ final class TeamsSyncTests: XCTestCase {
         _ = sync.read(true, at: 10)
         sync.pressed(at: 10, inBackground: true)
         sync.ask(true, serial: 2, at: 10.8, inBackground: true)
-        XCTAssertEqual(sync.read(true, at: 10.8), .nothing,
+        XCTAssertEqual(sync.read(true, at: 10.8), .press,
                        "the old label would say Teams is already muted, and leave it live")
-        XCTAssertEqual(sync.read(false, at: 11.1), .nothing)
-        XCTAssertEqual(sync.read(false, at: 10 + TeamsSync.backgroundSettle), .press,
-                       "the newer press is delivered against what the first one did")
+    }
+
+    /// 16 November, Teams behind another app, unmute / mute / unmute under a second
+    /// apart. The mute waited out what was left of the two seconds, the unmute replaced
+    /// it, and Teams was never pressed for the mute: it was left live over a microphone
+    /// that had been muted at once, and the user ended up muting it inside Teams.
+    func testMuteRightAfterAnUnmuteBehindAnotherAppIsNotHeldBack() {
+        var sync = TeamsSync()
+        sync.begin(at: 0)
+        _ = sync.read(true, at: 0.4)
+
+        sync.ask(false, serial: 1, at: 10, inBackground: true)
+        XCTAssertEqual(sync.read(true, at: 10), .press)
+        sync.pressed(at: 10.008, inBackground: true)
+
+        sync.ask(true, serial: 2, at: 10.6, inBackground: true)
+        XCTAssertEqual(sync.wait(at: 10.6), 0)
+        XCTAssertEqual(sync.read(true, at: 10.6), .press, "label still says muted: the unmute has not shown")
+        sync.pressed(at: 10.61, inBackground: true)
+
+        sync.ask(false, serial: 3, at: 11.4, inBackground: true)
+        XCTAssertEqual(sync.read(true, at: 11.4), .press, "and the next one reverses that in turn")
+        sync.pressed(at: 11.41, inBackground: true)
+
+        XCTAssertGreaterThan(sync.wait(at: 11.5), 0, "now it is waited on, to be sure it landed")
+        XCTAssertEqual(sync.read(false, at: 11.41 + TeamsSync.backgroundSettle), .settled(pressed: true))
+    }
+
+    /// Teams that moves its own mute to the microphone's is left to it, as before: the
+    /// press would be the second toggle.
+    func testReversingIsLeftToTeamsThatFollowsTheDevice() {
+        var sync = TeamsSync()
+        sync.begin(at: 0)
+        sync.ask(true, serial: 1, at: 10)
+        _ = sync.read(false, at: 10)
+        sync.pressed(at: 10)
+        _ = sync.read(false, at: 10 + settle)
+        XCTAssertTrue(sync.followsDevice)
+        sync.pressed(at: 10.5)
+        _ = sync.read(true, at: 10.5 + settle)
+
+        sync.ask(false, serial: 2, at: 20)
+        sync.pressed(at: 20.1)   // an earlier request's press, still showing
+        sync.ask(true, serial: 3, at: 20.3)
+        XCTAssertGreaterThan(sync.wait(at: 20.3), 0)
+        XCTAssertEqual(sync.read(true, at: 20.3), .nothing)
     }
 
     /// Back in front, Teams answers in a tenth of a second again, and is read at the

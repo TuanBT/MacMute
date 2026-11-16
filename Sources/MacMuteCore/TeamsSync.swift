@@ -89,6 +89,8 @@ public struct TeamsSync {
     private var lastPress: TimeInterval?
     /// How long the last press is given to show, decided when it was made.
     private var lastSettle = TeamsSync.settle
+    /// What the last press, if it reached the button, is moving Teams to.
+    private var lastTarget: Bool?
 
     public init() {}
 
@@ -105,6 +107,7 @@ public struct TeamsSync {
         seen = nil
         request = nil
         followsDevice = false
+        lastTarget = nil
     }
 
     /// Nothing has had a microphone open for a while: the call is over.
@@ -113,6 +116,7 @@ public struct TeamsSync {
         seen = nil
         request = nil
         followsDevice = false
+        lastTarget = nil
     }
 
     /// The user asked for `target` — the shortcut, the menu, either edge of a hold.
@@ -124,9 +128,35 @@ public struct TeamsSync {
                           settle: inBackground ? Self.backgroundSettle : Self.settle)
     }
 
+    /// What our last press is moving Teams to, while its label has not had time to show
+    /// it. Nil once it has, and nil when the press never reached the button.
+    ///
+    /// The label cannot be trusted in that window, but the press can: it was made because
+    /// Teams showed the opposite of what was asked, so Teams is going to show this.
+    public func inFlight(at now: TimeInterval) -> Bool? {
+        guard let target = lastTarget, let lastPress, now < lastPress + lastSettle else { return nil }
+        return target
+    }
+
+    /// A request for the opposite of what a press is still bringing about. Teams is known
+    /// to be heading for the other state, so one more press is the answer, now, without
+    /// waiting for a label that would only show the press before it.
+    ///
+    /// Not while Teams follows the microphone by itself: its toggle would then be the
+    /// second one, and that case waits for Teams to have done what it does.
+    private func reversesPress(at now: TimeInterval) -> Bool {
+        guard let request, !followsDevice, let moving = inFlight(at: now) else { return false }
+        return moving != request.target
+    }
+
     /// How long until the label is worth reading: a press of ours settling, or Teams
     /// following the microphone by itself, when it does that.
     public func wait(at now: TimeInterval) -> TimeInterval {
+        // Behind another app a press takes up to two seconds to show. A keypress that
+        // undoes it inside that time used to be held back for what was left, and a third
+        // keypress then replaced it before it was ever delivered: Teams got the unmute
+        // and never the mute, while the microphone itself had been muted at once.
+        if reversesPress(at: now) { return 0 }
         var until = lastPress.map { $0 + lastSettle } ?? 0
         if followsDevice, let request, request.presses == 0 {
             until = max(until, request.made + request.settle)
@@ -138,6 +168,7 @@ public struct TeamsSync {
     public mutating func read(_ teamsMuted: Bool, at now: TimeInterval) -> Step {
         guard wait(at: now) == 0 else { return .nothing }
         if let request {
+            if reversesPress(at: now) { return .press }
             if teamsMuted == request.target {
                 seen = teamsMuted
                 self.request = nil
@@ -162,11 +193,14 @@ public struct TeamsSync {
     }
 
     /// The button was pressed. A press that failed counts the same, so a button that
-    /// keeps refusing is not retried forever. `inBackground` is whether Teams was behind
-    /// another app at the press, and so how long the press is given to show.
-    public mutating func pressed(at now: TimeInterval, inBackground: Bool = false) {
+    /// keeps refusing is not retried forever — but it moved nothing, so `landed` false
+    /// leaves no state to build on. `inBackground` is whether Teams was behind another
+    /// app at the press, and so how long the press is given to show.
+    public mutating func pressed(at now: TimeInterval, inBackground: Bool = false,
+                                 landed: Bool = true) {
         lastPress = now
         lastSettle = inBackground ? Self.backgroundSettle : Self.settle
+        lastTarget = landed ? request?.target : nil
         request?.presses += 1
     }
 

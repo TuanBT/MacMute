@@ -160,6 +160,7 @@ final class TeamsAccessibility {
         // is currently muted.
         let teamsMuted = label.contains("unmute")
         let waited = sync.followsDevice
+        let moving = sync.inFlight(at: now)
         let step = sync.read(teamsMuted, at: now)
         if sync.followsDevice && !waited {
             Log.write("teams: Teams follows the microphone's own mute this call, "
@@ -180,6 +181,9 @@ final class TeamsAccessibility {
         case .press:
             if request.presses > 0 {
                 Log.write("teams: shows \"\(label)\" ⚠︎ Teams did NOT follow, pressing again")
+            } else if let heading = moving, heading != request.target, !waited {
+                Log.write("teams: last press is still moving Teams to \(Self.state(heading)), "
+                          + "label \"\(label)\" is not to be trusted yet, pressing at once")
             } else if waited {
                 Log.write("teams: shows \"\(label)\", did not follow the microphone this time, pressing")
             }
@@ -193,7 +197,7 @@ final class TeamsAccessibility {
         let result = AXUIElementPerformAction(button, kAXPressAction as CFString)
         let background = inBackground
         let pressedAt = now
-        sync.pressed(at: pressedAt, inBackground: background)
+        sync.pressed(at: pressedAt, inBackground: background, landed: result == .success)
         if result == .success {
             Log.write("teams: pressed \"\(label)\"" + (background ? " with Teams in the background" : ""))
         } else {
